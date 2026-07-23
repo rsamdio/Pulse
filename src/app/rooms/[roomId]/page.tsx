@@ -8,7 +8,7 @@ import { QuestionCard } from "@/components/QuestionCard";
 import { AccessBadge } from "@/components/AccessBadge";
 import { useAuth } from "@/contexts/AuthContext";
 import { api } from "@/lib/api";
-import { useRoom } from "@/lib/hooks/useRoom";
+import { useRoom, type RoomListenPhase } from "@/lib/hooks/useRoom";
 import type { RoomDoc } from "@/lib/types";
 
 function RoomView() {
@@ -46,9 +46,14 @@ function RoomView() {
     void checkAccess();
   }, [checkAccess]);
 
+  // Overlap RTDB with access check. Phase remounts listeners after membership grant.
+  const listenPhase: RoomListenPhase =
+    gate === null ? "pending" : gate.allowed ? "allowed" : "denied";
+
   const { meta, questions, loading, error } = useRoom(
-    gate?.allowed ? roomId : undefined,
+    user?.uid ? roomId : undefined,
     user?.uid,
+    listenPhase,
   );
 
   const isOrganizer = gate?.isOrganizer ?? false;
@@ -79,17 +84,26 @@ function RoomView() {
     }
   };
 
-  const onVote = async (questionId: string) => {
-    await api.voteQuestion({ roomId, questionId });
-  };
+  const onVote = useCallback(
+    async (questionId: string) => {
+      await api.voteQuestion({ roomId, questionId });
+    },
+    [roomId],
+  );
 
-  const onDelete = async (questionId: string) => {
-    await api.deleteQuestion({ roomId, questionId });
-  };
+  const onDelete = useCallback(
+    async (questionId: string) => {
+      await api.deleteQuestion({ roomId, questionId });
+    },
+    [roomId],
+  );
 
-  const onToggleAnswered = async (questionId: string, answered: boolean) => {
-    await api.setQuestionAnswered({ roomId, questionId, answered });
-  };
+  const onToggleAnswered = useCallback(
+    async (questionId: string, answered: boolean) => {
+      await api.setQuestionAnswered({ roomId, questionId, answered });
+    },
+    [roomId],
+  );
 
   if (gateError) {
     return (
@@ -99,15 +113,7 @@ function RoomView() {
     );
   }
 
-  if (!gate || (gate.allowed && loading && !meta)) {
-    return (
-      <p className="mt-12 text-center text-sm text-[var(--ink-muted)]">
-        Opening room…
-      </p>
-    );
-  }
-
-  if (!gate.allowed) {
+  if (gate && !gate.allowed) {
     return (
       <div className="panel mx-auto mt-10 max-w-md text-center">
         <h1 className="font-[family-name:var(--font-display)] text-2xl">
@@ -124,11 +130,20 @@ function RoomView() {
     );
   }
 
-  const title = meta?.title ?? gate.room?.title ?? "Room";
-  const roomDescription = meta?.description ?? gate.room?.description ?? "";
-  const accessMode = meta?.accessMode ?? gate.room?.accessMode ?? "public";
+  // Paint when RTDB meta arrived in parallel, or after allowed + first snapshot.
+  if (!meta && (gate === null || (gate.allowed && loading))) {
+    return (
+      <p className="mt-12 text-center text-sm text-[var(--ink-muted)]">
+        Opening room…
+      </p>
+    );
+  }
+
+  const title = meta?.title ?? gate?.room?.title ?? "Room";
+  const roomDescription = meta?.description ?? gate?.room?.description ?? "";
+  const accessMode = meta?.accessMode ?? gate?.room?.accessMode ?? "public";
   const isAnonymous =
-    Boolean(meta?.anonymous) || Boolean(gate.room?.anonymous);
+    Boolean(meta?.anonymous) || Boolean(gate?.room?.anonymous);
 
   return (
     <div

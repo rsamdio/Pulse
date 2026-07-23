@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { memo, useEffect, useState } from "react";
 import type { QuestionView } from "@/lib/types";
 import {
   formatRelativeTime,
@@ -11,7 +11,7 @@ import { ConfirmDialog } from "@/components/ConfirmDialog";
 
 const DESCRIPTION_PREVIEW_CHARS = 110;
 
-export function QuestionCard({
+function QuestionCardInner({
   question,
   rank,
   anonymous = false,
@@ -38,18 +38,33 @@ export function QuestionCard({
   const [expanded, setExpanded] = useState(false);
   const [voteError, setVoteError] = useState<string | null>(null);
   const [modError, setModError] = useState<string | null>(null);
+  const [optimistic, setOptimistic] = useState<{
+    hasVoted: boolean;
+    voteCount: number;
+  } | null>(null);
 
   const answered = Boolean(question.answered);
+  const hasVoted = optimistic?.hasVoted ?? question.hasVoted;
+  const voteCount = optimistic?.voteCount ?? question.voteCount;
+
+  // Reconcile when RTDB catches up with the optimistic click.
+  useEffect(() => {
+    setOptimistic(null);
+  }, [question.hasVoted, question.voteCount]);
 
   const handleVote = async () => {
     if (disabled || busy) return;
+    const nextVoted = !hasVoted;
+    const nextCount = Math.max(0, voteCount + (nextVoted ? 1 : -1));
+    setOptimistic({ hasVoted: nextVoted, voteCount: nextCount });
     setBusy(true);
     setVoteError(null);
+    setPulse(true);
+    window.setTimeout(() => setPulse(false), 700);
     try {
       await onVote(question.id);
-      setPulse(true);
-      window.setTimeout(() => setPulse(false), 700);
     } catch (err) {
+      setOptimistic(null);
       setVoteError(err instanceof Error ? err.message : "Vote failed");
     } finally {
       setBusy(false);
@@ -109,27 +124,23 @@ export function QuestionCard({
             </span>
             <button
               type="button"
-              className={`vote-btn ${question.hasVoted ? "vote-btn-on" : ""}`}
+              className={`vote-btn ${hasVoted ? "vote-btn-on" : ""}`}
               disabled={disabled || busy}
               onClick={() => void handleVote()}
-              aria-pressed={question.hasVoted}
+              aria-pressed={hasVoted}
               aria-label={
-                question.hasVoted
-                  ? "Remove your upvote"
-                  : "Upvote this question"
+                hasVoted ? "Remove your upvote" : "Upvote this question"
               }
               title={
-                question.hasVoted
-                  ? "Click to remove your upvote"
-                  : "Click to upvote"
+                hasVoted ? "Click to remove your upvote" : "Click to upvote"
               }
             >
               <span className="vote-chevron" aria-hidden>
                 ▲
               </span>
-              <span className="vote-count">{question.voteCount}</span>
+              <span className="vote-count">{voteCount}</span>
               <span className="vote-label">
-                {question.hasVoted ? "Upvoted" : "Upvote"}
+                {hasVoted ? "Upvoted" : "Upvote"}
               </span>
             </button>
           </div>
@@ -203,7 +214,7 @@ export function QuestionCard({
               <time dateTime={new Date(question.createdAt).toISOString()}>
                 {formatRelativeTime(question.createdAt)}
               </time>
-              {question.hasVoted ? (
+              {hasVoted ? (
                 <>
                   <span aria-hidden>·</span>
                   <span className="question-upvoted">You upvoted</span>
@@ -247,3 +258,5 @@ export function QuestionCard({
     </>
   );
 }
+
+export const QuestionCard = memo(QuestionCardInner);

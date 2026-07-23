@@ -183,15 +183,17 @@ async function grantMembership(
   uid: string,
   via: "allowlist" | "code" | "organizer" | "public",
 ): Promise<void> {
-  await db.doc(`roomMembers/${roomId}/members/${uid}`).set(
-    {
-      uid,
-      joinedAt: Date.now(),
-      via,
-    },
-    { merge: true },
-  );
-  await mirrorAccess(uid, roomId, true);
+  await Promise.all([
+    db.doc(`roomMembers/${roomId}/members/${uid}`).set(
+      {
+        uid,
+        joinedAt: Date.now(),
+        via,
+      },
+      { merge: true },
+    ),
+    mirrorAccess(uid, roomId, true),
+  ]);
 }
 
 export const ensureUser = onCall(async (request) => {
@@ -208,8 +210,10 @@ export const ensureUser = onCall(async (request) => {
   let organizerSnap = organizerSnapInitial;
   const isNewUser = !userSnap.exists;
 
-  if (!organizerSnap.exists) {
-    // First-ever organizer: claim when the organizers collection is empty.
+  // Bootstrap only for brand-new accounts. Returning attendees skip the
+  // organizers.limit(1) probe — once any organizer exists, new users won't
+  // claim; if the collection is empty, the next first signup still can.
+  if (isNewUser && !organizerSnap.exists) {
     const existingOrganizers = await db.collection("organizers").limit(1).get();
     if (existingOrganizers.empty) {
       await grantOrganizer(uid, {
@@ -330,7 +334,7 @@ export const listAccessibleRooms = onCall(async (request) => {
     }
   }
 
-  // Invited by allowlist → show in Your rooms (and grant membership).
+  // Invited by allowlist → show in Your rooms (read-only; membership on enter).
   const allowRoomIds = [
     ...new Set(
       allowlistHits.docs
@@ -340,17 +344,6 @@ export const listAccessibleRooms = onCall(async (request) => {
   ].filter((id) => !summaries.has(id));
 
   if (allowRoomIds.length) {
-    await Promise.all(
-      allowRoomIds.map(async (id) => {
-        const memberRef = db.doc(`roomMembers/${id}/members/${uid}`);
-        const memberSnap = await memberRef.get();
-        if (!memberSnap.exists) {
-          await grantMembership(id, uid, "allowlist");
-        } else {
-          await mirrorAccess(uid, id, true);
-        }
-      }),
-    );
     const roomSnaps = await Promise.all(
       allowRoomIds.map((id) => db.doc(`rooms/${id}`).get()),
     );
@@ -734,12 +727,12 @@ export const voteQuestion = onCall(async (request) => {
     }
   });
 
-  await mirrorVoteCount(roomId, questionId, newCount);
-  if (voted) {
-    await mirrorUserVote(uid, roomId, questionId);
-  } else {
-    await clearUserVote(uid, roomId, questionId);
-  }
+  await Promise.all([
+    mirrorVoteCount(roomId, questionId, newCount),
+    voted
+      ? mirrorUserVote(uid, roomId, questionId)
+      : clearUserVote(uid, roomId, questionId),
+  ]);
   return { ok: true as const, voted, voteCount: newCount };
 });
 

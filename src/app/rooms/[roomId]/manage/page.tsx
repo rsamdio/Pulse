@@ -67,22 +67,25 @@ function ManageRoom() {
         return;
       }
       setRoom(access.room);
-      if (
-        access.room.accessMode === "allowlist" ||
-        access.room.accessMode === "hybrid"
-      ) {
-        const list = await api.getAllowlist({ roomId });
-        setEmails(list.emails.join("\n"));
-      }
-      if (
-        access.room.accessMode === "join_code" ||
-        access.room.accessMode === "hybrid"
-      ) {
-        const codeRes = await api.getJoinCode({ roomId });
-        setJoinCode(codeRes.joinCode);
-      } else {
-        setJoinCode(null);
-      }
+
+      const mode = access.room.accessMode;
+      const needsAllowlist = mode === "allowlist" || mode === "hybrid";
+      const needsCode = mode === "join_code" || mode === "hybrid";
+
+      const [list, codeRes] = await Promise.all([
+        needsAllowlist
+          ? api.getAllowlist({ roomId })
+          : Promise.resolve({ emails: [] as string[] }),
+        needsCode
+          ? api.getJoinCode({ roomId })
+          : Promise.resolve({ joinCode: null as string | null }),
+      ]);
+
+      if (needsAllowlist) setEmails(list.emails.join("\n"));
+      else setEmails("");
+
+      if (needsCode) setJoinCode(codeRes.joinCode);
+      else setJoinCode(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load");
     }

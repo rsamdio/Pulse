@@ -6,17 +6,31 @@ import { getRtdb } from "@/lib/firebase/client";
 import type { RoomMetaRtdb, QuestionView } from "@/lib/types";
 import { sortQuestions } from "@/lib/utils";
 
-export function useRoom(roomId: string | undefined, uid: string | undefined) {
+export type RoomListenPhase = "pending" | "allowed" | "denied";
+
+/**
+ * Live room board from RTDB.
+ * `phase`:
+ * - pending: subscribe early (public / existing access); permission errors are soft
+ * - allowed: subscribe; permission errors are fatal
+ * - denied: no listeners
+ */
+export function useRoom(
+  roomId: string | undefined,
+  uid: string | undefined,
+  phase: RoomListenPhase = "allowed",
+) {
   const [meta, setMeta] = useState<RoomMetaRtdb | null>(null);
   const [questions, setQuestions] = useState<QuestionView[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!roomId || !uid) {
+    if (!roomId || !uid || phase === "denied") {
       setMeta(null);
       setQuestions([]);
-      setLoading(false);
+      setLoading(phase === "pending");
+      setError(null);
       return;
     }
 
@@ -28,14 +42,38 @@ export function useRoom(roomId: string | undefined, uid: string | undefined) {
     let metaData: RoomMetaRtdb | null = null;
     let questionMap: Record<string, QuestionView> = {};
     let voteMap: Record<string, boolean> = {};
+    let metaReady = false;
+    let questionsReady = false;
+    let votesReady = false;
+    let publishScheduled = false;
 
-    const publish = () => {
+    const publishNow = () => {
       const list = Object.values(questionMap).map((q) => ({
         ...q,
         hasVoted: Boolean(voteMap[q.id]),
       }));
       setQuestions(sortQuestions(list));
       setMeta(metaData);
+      if (metaReady && questionsReady && votesReady) {
+        setLoading(false);
+      }
+    };
+
+    const schedulePublish = () => {
+      if (publishScheduled) return;
+      publishScheduled = true;
+      queueMicrotask(() => {
+        publishScheduled = false;
+        publishNow();
+      });
+    };
+
+    const onListenError = (err: Error) => {
+      if (phase === "pending") {
+        // Likely private room before membership grant; wait for access phase.
+        return;
+      }
+      setError(err.message);
       setLoading(false);
     };
 
@@ -44,12 +82,10 @@ export function useRoom(roomId: string | undefined, uid: string | undefined) {
         ref(db, `rooms/${roomId}/meta`),
         (snap) => {
           metaData = snap.exists() ? (snap.val() as RoomMetaRtdb) : null;
-          publish();
+          metaReady = true;
+          schedulePublish();
         },
-        (err) => {
-          setError(err.message);
-          setLoading(false);
-        },
+        onListenError,
       ),
     );
 
@@ -74,12 +110,10 @@ export function useRoom(roomId: string | undefined, uid: string | undefined) {
               };
             }
           }
-          publish();
+          questionsReady = true;
+          schedulePublish();
         },
-        (err) => {
-          setError(err.message);
-          setLoading(false);
-        },
+        onListenError,
       ),
     );
 
@@ -88,19 +122,17 @@ export function useRoom(roomId: string | undefined, uid: string | undefined) {
         ref(db, `userVotes/${uid}/${roomId}`),
         (snap) => {
           voteMap = (snap.val() as Record<string, boolean> | null) ?? {};
-          publish();
+          votesReady = true;
+          schedulePublish();
         },
-        (err) => {
-          setError(err.message);
-          setLoading(false);
-        },
+        onListenError,
       ),
     );
 
     return () => {
       unsubs.forEach((u) => u());
     };
-  }, [roomId, uid]);
+  }, [roomId, uid, phase]);
 
   return { meta, questions, loading, error };
 }
@@ -119,12 +151,14 @@ export function useMyRoomAccessIndex(uid: string | undefined) {
     const db = getRtdb();
     const unsubAccess = onValue(ref(db, `access/${uid}`), (snap) => {
       const val = snap.val() as Record<string, boolean> | null;
-      setAccessIds(val ? Object.keys(val) : []);
+      setAccessIds(val ? Object.keys(val).filter((id) => val[id]) : []);
     });
     const unsubPublic = onValue(ref(db, "publicRoomIndex"), (snap) => {
       setPublicIndex(
-        (snap.val() as Record<string, { title: string; createdAt: number }>) ??
-          {},
+        (snap.val() as Record<
+          string,
+          { title: string; createdAt: number }
+        > | null) ?? {},
       );
     });
     return () => {
