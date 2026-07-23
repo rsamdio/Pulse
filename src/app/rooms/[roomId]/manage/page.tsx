@@ -7,6 +7,7 @@ import { RequireAuth } from "@/components/RequireAuth";
 import { AccessBadge } from "@/components/AccessBadge";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { api } from "@/lib/api";
+import { useDocumentTitle } from "@/lib/hooks/useDocumentTitle";
 import type { AccessMode, RoomDoc } from "@/lib/types";
 import { downloadTextFile, questionsToCsv } from "@/lib/utils";
 
@@ -94,6 +95,8 @@ function ManageRoom() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  useDocumentTitle(room ? `Manage · ${room.title}` : "Manage room");
 
   const patchFlags = async (patch: {
     questionsLocked?: boolean;

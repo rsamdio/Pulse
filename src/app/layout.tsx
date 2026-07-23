@@ -3,14 +3,15 @@ import { Bodoni_Moda, Hanken_Grotesk } from "next/font/google";
 import { AuthProvider } from "@/contexts/AuthContext";
 import { AppHeader } from "@/components/AppHeader";
 import { AppFooter } from "@/components/AppFooter";
+import {
+  DEFAULT_DESCRIPTION,
+  DEFAULT_TITLE,
+  ORG_NAME,
+  SITE_NAME,
+  SITE_URL,
+  TITLE_SUFFIX,
+} from "@/lib/branding";
 import "./globals.css";
-
-const SITE_URL = "https://pulse.rsamdio.org";
-const SITE_NAME = "Pulse";
-const ORG_NAME = "Rotaract South Asia MDIO";
-const DEFAULT_TITLE = "Pulse · Live Room Q&A | Rotaract South Asia MDIO";
-const DEFAULT_DESCRIPTION =
-  "Live rooms where the best questions rise to the top. By Rotaract South Asia MDIO.";
 
 const display = Bodoni_Moda({
   variable: "--font-display",
@@ -26,7 +27,7 @@ export const metadata: Metadata = {
   metadataBase: new URL(SITE_URL),
   title: {
     default: DEFAULT_TITLE,
-    template: `%s | ${SITE_NAME}`,
+    template: `%s | ${TITLE_SUFFIX}`,
   },
   description: DEFAULT_DESCRIPTION,
   applicationName: SITE_NAME,
@@ -49,7 +50,7 @@ export const metadata: Metadata = {
     type: "website",
     locale: "en_US",
     url: SITE_URL,
-    siteName: `${SITE_NAME} · ${ORG_NAME}`,
+    siteName: TITLE_SUFFIX,
     title: DEFAULT_TITLE,
     description: DEFAULT_DESCRIPTION,
     images: [

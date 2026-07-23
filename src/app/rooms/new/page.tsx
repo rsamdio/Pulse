@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { RequireAuth } from "@/components/RequireAuth";
 import { api } from "@/lib/api";
+import { useDocumentTitle } from "@/lib/hooks/useDocumentTitle";
 import type { AccessMode } from "@/lib/types";
 import { normalizeSlugInput } from "@/lib/utils";
 
@@ -38,6 +39,8 @@ function NewRoomForm() {
   const [slugTouched, setSlugTouched] = useState(false);
   const [description, setDescription] = useState("");
   const [accessMode, setAccessMode] = useState<AccessMode>("public");
+
+  useDocumentTitle("Create a room");
   const [anonymous, setAnonymous] = useState(false);
   const [allowlistText, setAllowlistText] = useState("");
   const [busy, setBusy] = useState(false);

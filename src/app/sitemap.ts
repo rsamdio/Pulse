@@ -1,6 +1,5 @@
 import type { MetadataRoute } from "next";
-
-const SITE_URL = "https://pulse.rsamdio.org";
+import { SITE_URL } from "@/lib/branding";
 
 export default function sitemap(): MetadataRoute.Sitemap {
   const lastModified = new Date();

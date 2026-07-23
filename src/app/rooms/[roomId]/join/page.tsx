@@ -5,6 +5,7 @@ import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { RequireAuth } from "@/components/RequireAuth";
 import { api } from "@/lib/api";
+import { useDocumentTitle } from "@/lib/hooks/useDocumentTitle";
 
 function JoinForm() {
   const params = useParams<{ roomId: string }>();
@@ -13,6 +14,8 @@ function JoinForm() {
   const [code, setCode] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  useDocumentTitle("Enter entry code");
 
   const onSubmit = async (e: FormEvent) => {
     e.preventDefault();

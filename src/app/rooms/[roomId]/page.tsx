@@ -9,6 +9,7 @@ import { AccessBadge } from "@/components/AccessBadge";
 import { useAuth } from "@/contexts/AuthContext";
 import { api } from "@/lib/api";
 import { useRoom, type RoomListenPhase } from "@/lib/hooks/useRoom";
+import { useDocumentTitle } from "@/lib/hooks/useDocumentTitle";
 import type { RoomDoc } from "@/lib/types";
 
 function RoomView() {
@@ -105,6 +106,14 @@ function RoomView() {
     [roomId],
   );
 
+  const title = meta?.title ?? gate?.room?.title ?? "Room";
+  const roomDescription = meta?.description ?? gate?.room?.description ?? "";
+  const accessMode = meta?.accessMode ?? gate?.room?.accessMode ?? "public";
+  const isAnonymous =
+    Boolean(meta?.anonymous) || Boolean(gate?.room?.anonymous);
+
+  useDocumentTitle(meta?.title ?? gate?.room?.title ?? null);
+
   if (gateError) {
     return (
       <div className="mx-auto max-w-md rounded-2xl border border-[var(--danger-soft)] bg-[var(--danger-soft)] p-4 text-sm text-[var(--danger)]">
@@ -138,12 +147,6 @@ function RoomView() {
       </p>
     );
   }
-
-  const title = meta?.title ?? gate?.room?.title ?? "Room";
-  const roomDescription = meta?.description ?? gate?.room?.description ?? "";
-  const accessMode = meta?.accessMode ?? gate?.room?.accessMode ?? "public";
-  const isAnonymous =
-    Boolean(meta?.anonymous) || Boolean(gate?.room?.anonymous);
 
   return (
     <div

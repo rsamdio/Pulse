@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { LegalPage } from "@/components/LegalPage";
+import { pageTitle } from "@/lib/branding";
 
 export const metadata: Metadata = {
   title: "Terms of Service",
@@ -7,7 +8,7 @@ export const metadata: Metadata = {
     "Terms of Service for Pulse, operated by Rotaract South Asia MDIO (RSAMDIO).",
   alternates: { canonical: "/terms" },
   openGraph: {
-    title: "Terms of Service | Pulse · Rotaract South Asia MDIO",
+    title: pageTitle("Terms of Service"),
     description:
       "Terms of Service for Pulse, operated by Rotaract South Asia MDIO (RSAMDIO).",
     url: "/terms",
