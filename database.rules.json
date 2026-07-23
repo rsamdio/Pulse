@@ -1,0 +1,32 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+    "rooms": {
+      "$roomId": {
+        "meta": {
+          ".read": "auth != null && (root.child('access').child(auth.uid).child($roomId).val() === true || data.child('accessMode').val() === 'public')"
+        },
+        "questions": {
+          ".read": "auth != null && (root.child('access').child(auth.uid).child($roomId).val() === true || root.child('rooms').child($roomId).child('meta').child('accessMode').val() === 'public')"
+        }
+      }
+    },
+    "access": {
+      "$uid": {
+        ".read": "auth != null && auth.uid === $uid",
+        "$roomId": {
+          ".read": "auth != null && auth.uid === $uid"
+        }
+      }
+    },
+    "userVotes": {
+      "$uid": {
+        ".read": "auth != null && auth.uid === $uid"
+      }
+    },
+    "publicRoomIndex": {
+      ".read": "auth != null"
+    }
+  }
+}

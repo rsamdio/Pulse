@@ -1,0 +1,35 @@
+{
+  "name": "pulse-web",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint",
+    "test": "vitest run && npm --prefix functions test",
+    "test:unit": "vitest run",
+    "functions:build": "npm --prefix functions run build",
+    "functions:install": "npm --prefix functions install",
+    "emulators": "npm run functions:build && firebase emulators:start --only auth,functions,firestore,database"
+  },
+  "dependencies": {
+    "firebase": "^12.16.0",
+    "next": "16.2.11",
+    "react": "19.2.4",
+    "react-dom": "19.2.4"
+  },
+  "devDependencies": {
+    "@netlify/plugin-nextjs": "^5.15.12",
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "16.2.11",
+    "firebase-tools": "^15.24.0",
+    "tailwindcss": "^4",
+    "typescript": "^5",
+    "vitest": "^3.2.7"
+  }
+}

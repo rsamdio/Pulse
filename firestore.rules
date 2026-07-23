@@ -1,0 +1,60 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isSelf(uid) {
+      return signedIn() && request.auth.uid == uid;
+    }
+
+    // Clients read their own profile; all mutations go through Callables.
+    match /users/{uid} {
+      allow read: if isSelf(uid);
+      allow write: if false;
+    }
+
+    match /organizers/{uid} {
+      // Source of truth for organizer capability. Clients never write this.
+      allow read: if isSelf(uid);
+      allow write: if false;
+    }
+
+    match /rooms/{roomId} {
+      // Room metadata is served via Callables + RTDB mirror; keep Firestore closed to clients.
+      allow read, write: if false;
+    }
+
+    match /roomAllowlists/{roomId}/emails/{email} {
+      allow read, write: if false;
+    }
+
+    match /roomMembers/{roomId}/members/{uid} {
+      allow read: if isSelf(uid);
+      allow write: if false;
+    }
+
+    match /questions/{roomId}/items/{questionId} {
+      allow read: if false;
+      allow write: if false;
+    }
+
+    match /votes/{roomId}/questions/{questionId}/users/{uid} {
+      allow read: if isSelf(uid);
+      allow write: if false;
+    }
+
+    match /joinCodes/{code} {
+      allow read, write: if false;
+    }
+
+    match /rateLimits/{id} {
+      allow read, write: if false;
+    }
+
+    match /mirrorFailures/{id} {
+      allow read, write: if false;
+    }
+  }
+}

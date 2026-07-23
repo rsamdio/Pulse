@@ -1,0 +1,12 @@
+# Netlify hosts the Next.js website only.
+# Firebase Auth / Firestore / RTDB / Cloud Functions stay on Firebase.
+
+[build]
+  command = "npm run build"
+  publish = ".next"
+
+[build.environment]
+  NODE_VERSION = "20"
+
+[[plugins]]
+  package = "@netlify/plugin-nextjs"
