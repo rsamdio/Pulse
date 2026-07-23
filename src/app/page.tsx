@@ -51,16 +51,16 @@ function HomeContent() {
   return (
     <section className="flex min-h-[calc(100vh-8rem)] items-center justify-center py-8">
       <div className="auth-card rise">
-        <p className="mb-2 text-[0.68rem] font-bold uppercase tracking-[0.18em] text-[var(--primary)]">
-          Live room Q&A
-        </p>
         <h1 className="font-[family-name:var(--font-display)] text-4xl font-bold tracking-tight text-[var(--secondary)] sm:text-5xl">
           Pul<span className="text-[var(--primary-deep)]">se</span>
         </h1>
+        <p className="mt-2 text-[0.68rem] font-bold uppercase tracking-[0.18em] text-[var(--primary)]">
+          Live room Q&A
+        </p>
         <p className="mt-3 text-sm leading-relaxed text-[var(--ink-soft)]">
           {pendingRoom
             ? "Sign in to open the room you were invited to."
-            : "Join a live room and help the best questions rise to the top."}
+            : "Live rooms for events and sessions. Organizers open a room, you sign in with Google, ask questions, and upvote so the best rise to the top in real time."}
         </p>
 
         {pendingRoom ? (
