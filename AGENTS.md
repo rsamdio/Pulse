@@ -20,14 +20,15 @@ Production URL: `https://pulse.rsamdio.org`
 - **Rooms** (not events): `rooms/{slug}`, `roomAllowlists`, `roomMembers`, RTDB `rooms/{slug}`, `publicRoomIndex`
 - Access modes: `public` | `allowlist` | `join_code` | `hybrid`
 - Flags: `questionsLocked`, `viewOnly`, `anonymous`
-- Roles: `organizers/{uid}` · first signed-in user can bootstrap as organizer
-- Callables use `roomId` (e.g. `createRoom`, `listAccessibleRooms`, `getRoomAccess`, `deleteRoom`)
+- Roles: `admins/{uid}` (super admin) · `organizers/{uid}` · attendees; first signed-in user bootstraps as admin+organizer
+- Callables use `roomId` (e.g. `createRoom`, `listAccessibleRooms`, `getRoomAccess`, `deleteRoom`); `promoteUser`/`demoteUser`/`listAdminDashboard` are admin-only
+- Admin UI: `/admin` (noindex) — organizers, all rooms, delete; room Q&A via Open/Manage (admin has organizer powers on every room)
 
 ## Key paths
 
 | Area | Location |
 |---|---|
-| App routes | `src/app/` (`/`, `/join`, `/rooms`, `/terms`, `/privacy`) |
+| App routes | `src/app/` (`/`, `/join`, `/rooms`, `/admin`, `/terms`, `/privacy`) |
 | UI components | `src/components/` |
 | Client API | `src/lib/api.ts` |
 | Types | `src/lib/types.ts` |

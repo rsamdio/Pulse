@@ -21,6 +21,16 @@ service cloud.firestore {
       allow write: if false;
     }
 
+    match /admins/{uid} {
+      // Super admin (promote/demote organizers). Clients never write this.
+      allow read: if isSelf(uid);
+      allow write: if false;
+    }
+
+    match /system/{docId} {
+      allow read, write: if false;
+    }
+
     match /rooms/{roomId} {
       // Room metadata is served via Callables + RTDB mirror; keep Firestore closed to clients.
       allow read, write: if false;

@@ -1,4 +1,4 @@
-export type UserRole = "organizer" | "attendee";
+export type UserRole = "admin" | "organizer" | "attendee";
 
 export type AccessMode = "public" | "allowlist" | "join_code" | "hybrid";
 
@@ -74,4 +74,31 @@ export interface AccessibleRoomSummary {
   createdAt: number;
   isOrganizer: boolean;
   via: "public" | "access" | "organizer";
+}
+
+export interface AdminPerson {
+  uid: string;
+  email: string;
+  displayName: string;
+  grantedAt: number;
+  grantedBy: string;
+}
+
+export interface AdminRoomSummary {
+  id: string;
+  slug: string;
+  title: string;
+  description: string;
+  accessMode: AccessMode;
+  questionsLocked: boolean;
+  viewOnly: boolean;
+  anonymous: boolean;
+  organizerId: string;
+  organizerEmail: string;
+  organizerName: string;
+  createdAt: number;
+  status: string;
+  questionCount: number;
+  memberCount: number;
+  voteTotal: number;
 }

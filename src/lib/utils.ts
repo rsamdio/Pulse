@@ -56,10 +56,15 @@ export function questionsToCsv(questions: QuestionView[]): string {
 }
 
 function csvEscape(value: string): string {
-  if (/[",\n]/.test(value)) {
-    return `"${value.replace(/"/g, '""')}"`;
+  let cell = value;
+  const trimmed = cell.trim();
+  if (/^[=+\-@\t\r]/.test(trimmed)) {
+    cell = `'${cell}`;
   }
-  return value;
+  if (/[",\n]/.test(cell)) {
+    return `"${cell.replace(/"/g, '""')}"`;
+  }
+  return cell;
 }
 
 export function downloadTextFile(

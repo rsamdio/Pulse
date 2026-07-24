@@ -6,6 +6,8 @@ import { getFirebaseFunctions } from "@/lib/firebase/client";
 import type {
   AccessibleRoomSummary,
   AccessMode,
+  AdminPerson,
+  AdminRoomSummary,
   RoomDoc,
   QuestionView,
 } from "@/lib/types";
@@ -110,4 +112,12 @@ export const api = {
     "promoteUser",
   ),
   demoteUser: call<{ uid: string }, { ok: true }>("demoteUser"),
+  listAdminDashboard: call<
+    undefined,
+    {
+      rooms: AdminRoomSummary[];
+      organizers: AdminPerson[];
+      admins: AdminPerson[];
+    }
+  >("listAdminDashboard"),
 };

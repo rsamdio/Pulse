@@ -27,6 +27,7 @@ function RoomView() {
   const [question, setQuestion] = useState("");
   const [questionDescription, setQuestionDescription] = useState("");
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const [submitSuccess, setSubmitSuccess] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [composeOpen, setComposeOpen] = useState(false);
 
@@ -46,6 +47,12 @@ function RoomView() {
   useEffect(() => {
     void checkAccess();
   }, [checkAccess]);
+
+  useEffect(() => {
+    if (!submitSuccess) return;
+    const id = window.setTimeout(() => setSubmitSuccess(null), 4000);
+    return () => window.clearTimeout(id);
+  }, [submitSuccess]);
 
   // Overlap RTDB with access check. Phase remounts listeners after membership grant.
   const listenPhase: RoomListenPhase =
@@ -69,6 +76,7 @@ function RoomView() {
     if (!canCompose || !question.trim()) return;
     setSubmitting(true);
     setSubmitError(null);
+    setSubmitSuccess(null);
     try {
       await api.createQuestion({
         roomId,
@@ -78,6 +86,9 @@ function RoomView() {
       setQuestion("");
       setQuestionDescription("");
       setComposeOpen(false);
+      setSubmitSuccess(
+        "Question posted. New questions start at the bottom until they get votes.",
+      );
     } catch (err) {
       setSubmitError(err instanceof Error ? err.message : "Could not submit");
     } finally {
@@ -239,6 +250,11 @@ function RoomView() {
       {canCompose ? (
         <div className="compose-dock">
           <div className="compose-dock-inner">
+            {submitSuccess ? (
+              <p className="compose-toast" role="status" aria-live="polite">
+                {submitSuccess}
+              </p>
+            ) : null}
             {!composeOpen ? (
               <form
                 className="compose-bar"

@@ -56,6 +56,9 @@ function ManageRoom() {
   const [busy, setBusy] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [linkCopied, setLinkCopied] = useState(false);
+  const [codeCopied, setCodeCopied] = useState(false);
+  const [codeFlash, setCodeFlash] = useState<string | null>(null);
 
   const roomPath = `/rooms/${roomId}`;
 
@@ -98,6 +101,38 @@ function ManageRoom() {
 
   useDocumentTitle(room ? `Manage · ${room.title}` : "Manage room");
 
+  useEffect(() => {
+    if (!linkCopied) return;
+    const id = window.setTimeout(() => setLinkCopied(false), 2000);
+    return () => window.clearTimeout(id);
+  }, [linkCopied]);
+
+  useEffect(() => {
+    if (!codeCopied) return;
+    const id = window.setTimeout(() => setCodeCopied(false), 2000);
+    return () => window.clearTimeout(id);
+  }, [codeCopied]);
+
+  useEffect(() => {
+    if (!codeFlash) return;
+    const id = window.setTimeout(() => setCodeFlash(null), 3500);
+    return () => window.clearTimeout(id);
+  }, [codeFlash]);
+
+  const copyRoomLink = async () => {
+    const ok = await copyText(`${window.location.origin}${roomPath}`);
+    if (ok) setLinkCopied(true);
+    else setError("Could not copy link");
+  };
+
+  const copyEntryCode = async () => {
+    if (!joinCode) return;
+    const ok = await copyText(joinCode);
+    if (ok) {
+      setCodeCopied(true);
+      setCodeFlash(null);
+    } else setError("Could not copy code");
+  };
   const patchFlags = async (patch: {
     questionsLocked?: boolean;
     viewOnly?: boolean;
@@ -153,7 +188,8 @@ function ManageRoom() {
       const res = await api.rotateJoinCode({ roomId });
       setJoinCode(res.joinCode);
       setCodeVisible(true);
-      setMessage("Entry code rotated. Old code no longer works.");
+      setCodeCopied(false);
+      setCodeFlash("New code ready. The old code no longer works.");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not rotate code");
     } finally {
@@ -232,6 +268,20 @@ function ManageRoom() {
         </Link>
       </div>
 
+      {message ? (
+        <p
+          className="rounded-xl border border-[var(--ok-soft)] bg-[var(--ok-soft)] px-3 py-2 text-sm text-[var(--ok)]"
+          aria-live="polite"
+        >
+          {message}
+        </p>
+      ) : null}
+      {error && room ? (
+        <p className="rounded-xl border border-[var(--danger-soft)] bg-[var(--danger-soft)] px-3 py-2 text-sm text-[var(--danger)]">
+          {error}
+        </p>
+      ) : null}
+
       <section className="panel space-y-3">
         <h2 className="font-[family-name:var(--font-display)] text-xl font-semibold">
           Share access
@@ -243,32 +293,39 @@ function ManageRoom() {
           <button
             type="button"
             className="btn btn-outline btn-sm shrink-0"
-            onClick={() =>
-              void copyText(`${window.location.origin}${roomPath}`).then(
-                (ok) =>
-                  setMessage(ok ? "Room link copied" : "Could not copy link"),
-              )
-            }
+            onClick={() => void copyRoomLink()}
           >
-            Copy link
+            {linkCopied ? "Copied" : "Copy link"}
           </button>
         </div>
+        {linkCopied ? (
+          <p className="text-xs font-medium text-[var(--ok)]" aria-live="polite">
+            Room link copied to clipboard
+          </p>
+        ) : null}
 
         {usesCode ? (
-          <div className="rounded-xl border border-[var(--line)] bg-[var(--surface-low)] p-4 space-y-2">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <span className="label-caps">6-digit entry code</span>
-              <div className="flex gap-2">
+          <div className="rounded-xl border border-[var(--line)] bg-[var(--surface-low)] p-4 space-y-3">
+            <span className="label-caps">6-digit entry code</span>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <p className="code-display m-0">
+                {joinCode
+                  ? codeVisible
+                    ? `${joinCode.slice(0, 3)} ${joinCode.slice(3)}`
+                    : "••• •••"
+                  : "······"}
+              </p>
+              <div className="flex shrink-0 gap-2">
                 <button
                   type="button"
-                  className="text-xs font-semibold text-[var(--secondary)] underline"
+                  className="btn btn-outline btn-sm"
                   onClick={() => setCodeVisible((v) => !v)}
                 >
                   {codeVisible ? "Hide" : "Show"}
                 </button>
                 <button
                   type="button"
-                  className="text-xs font-semibold text-[var(--primary-deep)] underline"
+                  className="btn btn-outline btn-sm"
                   disabled={busy}
                   onClick={() => void rotateCode()}
                 >
@@ -276,25 +333,32 @@ function ManageRoom() {
                 </button>
               </div>
             </div>
-            <p className="code-display">
-              {joinCode
-                ? codeVisible
-                  ? `${joinCode.slice(0, 3)} ${joinCode.slice(3)}`
-                  : "••• •••"
-                : "······"}
-            </p>
-            <button
-              type="button"
-              className="btn btn-primary btn-sm"
-              disabled={!joinCode || busy}
-              onClick={() =>
-                void copyText(joinCode ?? "").then((ok) =>
-                  setMessage(ok ? "Entry code copied" : "Could not copy code"),
-                )
-              }
-            >
-              Copy code
-            </button>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                className="btn btn-primary btn-sm"
+                disabled={!joinCode || busy}
+                onClick={() => void copyEntryCode()}
+              >
+                {codeCopied ? "Copied" : "Copy code"}
+              </button>
+              {codeCopied ? (
+                <span
+                  className="text-xs font-medium text-[var(--ok)]"
+                  aria-live="polite"
+                >
+                  Entry code copied
+                </span>
+              ) : null}
+            </div>
+            {codeFlash ? (
+              <p
+                className="text-xs font-medium text-[var(--ink-soft)]"
+                aria-live="polite"
+              >
+                {codeFlash}
+              </p>
+            ) : null}
           </div>
         ) : null}
       </section>
@@ -392,17 +456,6 @@ function ManageRoom() {
           </button>
         </form>
       )}
-
-      {message ? (
-        <p className="rounded-xl border border-[var(--ok-soft)] bg-[var(--ok-soft)] px-3 py-2 text-sm text-[var(--ok)]">
-          {message}
-        </p>
-      ) : null}
-      {error ? (
-        <p className="rounded-xl border border-[var(--danger-soft)] bg-[var(--danger-soft)] px-3 py-2 text-sm text-[var(--danger)]">
-          {error}
-        </p>
-      ) : null}
 
       <section className="panel space-y-3 border-[var(--danger-soft)]">
         <h2 className="font-[family-name:var(--font-display)] text-xl font-semibold text-[var(--danger)]">

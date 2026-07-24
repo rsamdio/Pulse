@@ -3,14 +3,26 @@ import {
   assertQuestionFields,
   assertSlug,
   canAccessRoom,
+  isValidJoinCodeShape,
   normalizeEmail,
   normalizeSlug,
+  roleFromDocs,
   roleFromOrganizerDoc,
+  sanitizeCsvCell,
 } from "../src/logic";
 
 describe("normalizeEmail", () => {
   it("trims and lowercases", () => {
     expect(normalizeEmail("  Alex@Example.COM ")).toBe("alex@example.com");
+  });
+});
+
+describe("roleFromDocs", () => {
+  it("prioritizes admin over organizer", () => {
+    expect(roleFromDocs(true, true)).toBe("admin");
+    expect(roleFromDocs(true, false)).toBe("admin");
+    expect(roleFromDocs(false, true)).toBe("organizer");
+    expect(roleFromDocs(false, false)).toBe("attendee");
   });
 });
 
@@ -44,6 +56,21 @@ describe("assertQuestionFields", () => {
     expect(() =>
       assertQuestionFields({ question: "x".repeat(201) }),
     ).toThrow();
+  });
+});
+
+describe("join codes", () => {
+  it("requires 6 digits", () => {
+    expect(isValidJoinCodeShape("123456")).toBe(true);
+    expect(isValidJoinCodeShape("12345")).toBe(false);
+    expect(isValidJoinCodeShape("1234567")).toBe(false);
+  });
+});
+
+describe("sanitizeCsvCell", () => {
+  it("neutralizes formula prefixes", () => {
+    expect(sanitizeCsvCell("=1+1")).toBe("'=1+1");
+    expect(sanitizeCsvCell("hello")).toBe("hello");
   });
 });
 

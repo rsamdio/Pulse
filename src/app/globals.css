@@ -862,6 +862,20 @@ select {
   pointer-events: auto;
 }
 
+.compose-toast {
+  margin: 0 0 0.55rem;
+  padding: 0.55rem 0.85rem;
+  border-radius: 0.85rem;
+  border: 1px solid rgba(15, 122, 90, 0.28);
+  background: color-mix(in srgb, var(--ok-soft) 85%, var(--surface));
+  color: var(--ok);
+  font-size: 0.78rem;
+  font-weight: 600;
+  line-height: 1.35;
+  box-shadow: var(--shadow);
+  animation: rise-in 220ms ease both;
+}
+
 .compose-bar {
   display: flex;
   align-items: center;

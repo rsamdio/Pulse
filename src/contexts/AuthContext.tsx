@@ -30,6 +30,7 @@ interface AuthContextValue {
   profile: AppUser | null;
   loading: boolean;
   isOrganizer: boolean;
+  isAdmin: boolean;
   signInWithGoogle: () => Promise<void>;
   signOut: () => Promise<void>;
   refreshProfile: () => Promise<void>;
@@ -39,17 +40,20 @@ const AuthContext = createContext<AuthContextValue | null>(null);
 
 async function readProfileFast(user: User): Promise<AppUser | null> {
   const db = getFirestoreDb();
-  const [userSnap, organizerSnap] = await Promise.all([
+  const [userSnap, organizerSnap, adminSnap] = await Promise.all([
     getDoc(doc(db, "users", user.uid)),
     getDoc(doc(db, "organizers", user.uid)),
+    getDoc(doc(db, "admins", user.uid)),
   ]);
 
   if (!userSnap.exists()) return null;
 
   const data = userSnap.data();
-  const role: UserRole = organizerSnap.exists()
-    ? "organizer"
-    : ((data.role as UserRole) ?? "attendee");
+  const role: UserRole = adminSnap.exists()
+    ? "admin"
+    : organizerSnap.exists()
+      ? "organizer"
+      : ((data.role as UserRole) ?? "attendee");
 
   return {
     uid: user.uid,
@@ -137,7 +141,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       user,
       profile,
       loading,
-      isOrganizer: profile?.role === "organizer",
+      isOrganizer:
+        profile?.role === "organizer" || profile?.role === "admin",
+      isAdmin: profile?.role === "admin",
       signInWithGoogle,
       signOut,
       refreshProfile,

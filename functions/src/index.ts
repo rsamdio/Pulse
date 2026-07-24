@@ -1,14 +1,20 @@
 import * as admin from "firebase-admin";
-import { createHash, randomBytes } from "crypto";
+import { createHash, randomBytes, timingSafeEqual } from "crypto";
 import { onCall, HttpsError, type CallableRequest } from "firebase-functions/v2/https";
 import { setGlobalOptions } from "firebase-functions/v2";
 import {
   assertQuestionFields,
+  assertRoomDescription,
+  assertRoomTitle,
   assertSlug,
   canAccessRoom,
+  isValidJoinCodeShape,
+  JOIN_CODE_DIGITS,
+  MAX_ALLOWLIST_EMAILS,
   normalizeEmail,
+  normalizeJoinCode,
   RATE_LIMIT_MS,
-  roleFromOrganizerDoc,
+  roleFromDocs,
   type AccessMode,
   type UserRole,
 } from "./logic";
@@ -41,6 +47,9 @@ function requireAuth(request: CallableRequest): {
   if (!request.auth?.uid) {
     throw new HttpsError("unauthenticated", "Sign in required");
   }
+  if (request.auth.token.email_verified !== true) {
+    throw new HttpsError("failed-precondition", "Verified email required");
+  }
   const email = request.auth.token.email;
   if (!email) {
     throw new HttpsError("failed-precondition", "Verified email required");
@@ -52,7 +61,13 @@ function requireAuth(request: CallableRequest): {
   };
 }
 
+async function isAdminUid(uid: string): Promise<boolean> {
+  const snap = await db.doc(`admins/${uid}`).get();
+  return snap.exists;
+}
+
 async function isOrganizerUid(uid: string): Promise<boolean> {
+  if (await isAdminUid(uid)) return true;
   const snap = await db.doc(`organizers/${uid}`).get();
   return snap.exists;
 }
@@ -61,6 +76,32 @@ async function requireOrganizer(uid: string): Promise<void> {
   if (!(await isOrganizerUid(uid))) {
     throw new HttpsError("permission-denied", "Organizer role required");
   }
+}
+
+async function requireAdmin(uid: string): Promise<void> {
+  if (!(await isAdminUid(uid))) {
+    throw new HttpsError("permission-denied", "Super admin required");
+  }
+}
+
+async function grantAdmin(
+  targetUid: string,
+  meta: { email?: string; displayName?: string; grantedBy: string },
+): Promise<void> {
+  await db.doc(`admins/${targetUid}`).set(
+    {
+      uid: targetUid,
+      email: meta.email ?? null,
+      displayName: meta.displayName ?? null,
+      grantedBy: meta.grantedBy,
+      grantedAt: Date.now(),
+    },
+    { merge: true },
+  );
+  await db.doc(`users/${targetUid}`).set(
+    { role: "admin" satisfies UserRole },
+    { merge: true },
+  );
 }
 
 async function grantOrganizer(
@@ -77,25 +118,43 @@ async function grantOrganizer(
     },
     { merge: true },
   );
-  await db.doc(`users/${targetUid}`).set(
-    { role: "organizer" satisfies UserRole },
-    { merge: true },
-  );
+  const adminSnap = await db.doc(`admins/${targetUid}`).get();
+  if (!adminSnap.exists) {
+    await db.doc(`users/${targetUid}`).set(
+      { role: "organizer" satisfies UserRole },
+      { merge: true },
+    );
+  }
 }
 
 function hashJoinCode(code: string): string {
   return createHash("sha256").update(normalizeJoinCode(code)).digest("hex");
 }
 
-/** Digits only — attendees type what they see on screen. */
-function normalizeJoinCode(raw: string): string {
-  return String(raw ?? "").replace(/\D/g, "");
+function safeEqualHex(a: string, b: string): boolean {
+  try {
+    const ba = Buffer.from(a, "hex");
+    const bb = Buffer.from(b, "hex");
+    if (ba.length === 0 || ba.length !== bb.length) return false;
+    return timingSafeEqual(ba, bb);
+  } catch {
+    return false;
+  }
 }
 
-/** Globally unique 6-digit code (100000–999999), indexed at joinCodes/{code}. */
+function safeEqualDigits(a: string, b: string): boolean {
+  const ba = Buffer.from(a, "utf8");
+  const bb = Buffer.from(b, "utf8");
+  if (ba.length === 0 || ba.length !== bb.length) return false;
+  return timingSafeEqual(ba, bb);
+}
+
+/** Globally unique join code, indexed at joinCodes/{code}. */
 async function allocateUniqueJoinCode(roomId: string): Promise<string> {
-  for (let attempt = 0; attempt < 24; attempt++) {
-    const n = 100000 + (randomBytes(4).readUInt32BE(0) % 900000);
+  const min = 10 ** (JOIN_CODE_DIGITS - 1);
+  const span = 9 * 10 ** (JOIN_CODE_DIGITS - 1);
+  for (let attempt = 0; attempt < 32; attempt++) {
+    const n = min + (randomBytes(4).readUInt32BE(0) % span);
     const code = String(n);
     const ref = db.doc(`joinCodes/${code}`);
     try {
@@ -144,9 +203,11 @@ async function rateLimit(
   uid: string,
   action: keyof typeof RATE_LIMIT_MS,
 ): Promise<void> {
+  const minGap = RATE_LIMIT_MS[action];
+  if (minGap <= 0) return;
+
   const ref = db.doc(`rateLimits/${uid}_${action}`);
   const now = Date.now();
-  const minGap = RATE_LIMIT_MS[action];
   await db.runTransaction(async (tx) => {
     const snap = await tx.get(ref);
     const last = snap.data()?.at as number | undefined;
@@ -159,10 +220,11 @@ async function rateLimit(
 
 async function loadAccessContext(roomId: string, uid: string, email: string) {
   const roomRef = db.doc(`rooms/${roomId}`);
-  const [roomSnap, allowSnap, memberSnap] = await Promise.all([
+  const [roomSnap, allowSnap, memberSnap, admin] = await Promise.all([
     roomRef.get(),
     db.doc(`roomAllowlists/${roomId}/emails/${normalizeEmail(email)}`).get(),
     db.doc(`roomMembers/${roomId}/members/${uid}`).get(),
+    isAdminUid(uid),
   ]);
   if (!roomSnap.exists) {
     throw new HttpsError("not-found", "Room not found");
@@ -171,7 +233,7 @@ async function loadAccessContext(roomId: string, uid: string, email: string) {
   return {
     room,
     roomRef,
-    isOrganizer: room.organizerId === uid,
+    isOrganizer: room.organizerId === uid || admin,
     onAllowlist: allowSnap.exists,
     isMember: memberSnap.exists,
     accessMode: room.accessMode as AccessMode,
@@ -196,36 +258,93 @@ async function grantMembership(
   ]);
 }
 
+async function revokeMembership(roomId: string, memberUid: string): Promise<void> {
+  await Promise.all([
+    db.doc(`roomMembers/${roomId}/members/${memberUid}`).delete(),
+    clearMirroredMemberAccess(memberUid, roomId),
+  ]);
+}
+
+/** Drop sticky public memberships when a room is no longer public. */
+async function revokePublicViaMembers(
+  roomId: string,
+  organizerId: string,
+): Promise<void> {
+  const members = await db.collection(`roomMembers/${roomId}/members`).get();
+  await Promise.all(
+    members.docs.map(async (docSnap) => {
+      if (docSnap.id === organizerId) return;
+      if (docSnap.data()?.via !== "public") return;
+      await revokeMembership(roomId, docSnap.id);
+    }),
+  );
+}
+
+/** After allowlist replace, revoke allowlist members whose email is no longer listed. */
+async function revokeStaleAllowlistMembers(
+  roomId: string,
+  organizerId: string,
+  allowedEmails: Set<string>,
+): Promise<void> {
+  const members = await db.collection(`roomMembers/${roomId}/members`).get();
+  await Promise.all(
+    members.docs.map(async (docSnap) => {
+      if (docSnap.id === organizerId) return;
+      if (docSnap.data()?.via !== "allowlist") return;
+      const userSnap = await db.doc(`users/${docSnap.id}`).get();
+      const email = normalizeEmail(String(userSnap.data()?.email ?? ""));
+      if (!email || !allowedEmails.has(email)) {
+        await revokeMembership(roomId, docSnap.id);
+      }
+    }),
+  );
+}
+
 export const ensureUser = onCall(async (request) => {
   const { uid, email, name } = requireAuth(request);
+  await rateLimit(uid, "ensureUser");
   const userRef = db.doc(`users/${uid}`);
   const organizerRef = db.doc(`organizers/${uid}`);
+  const adminRef = db.doc(`admins/${uid}`);
   const forceSyncAllowlist = Boolean(request.data?.forceSyncAllowlist);
 
-  const [userSnap, organizerSnapInitial] = await Promise.all([
+  const [userSnap, organizerSnapInitial, adminSnapInitial] = await Promise.all([
     userRef.get(),
     organizerRef.get(),
+    adminRef.get(),
   ]);
 
   let organizerSnap = organizerSnapInitial;
+  let adminSnap = adminSnapInitial;
   const isNewUser = !userSnap.exists;
 
-  // Bootstrap only for brand-new accounts. Returning attendees skip the
-  // organizers.limit(1) probe — once any organizer exists, new users won't
-  // claim; if the collection is empty, the next first signup still can.
-  if (isNewUser && !organizerSnap.exists) {
-    const existingOrganizers = await db.collection("organizers").limit(1).get();
-    if (existingOrganizers.empty) {
+  // First account ever: transactional bootstrap → super admin + organizer.
+  if (isNewUser && !organizerSnap.exists && !adminSnap.exists) {
+    const lockRef = db.doc("system/bootstrap");
+    try {
+      await lockRef.create({
+        adminUid: uid,
+        email,
+        createdAt: Date.now(),
+      });
+      await grantAdmin(uid, {
+        email,
+        displayName: name,
+        grantedBy: "bootstrap",
+      });
       await grantOrganizer(uid, {
         email,
         displayName: name,
         grantedBy: "bootstrap",
       });
+      adminSnap = await adminRef.get();
       organizerSnap = await organizerRef.get();
+    } catch {
+      // Another signup won the bootstrap race — continue as attendee.
     }
   }
 
-  const role = roleFromOrganizerDoc(organizerSnap.exists);
+  const role = roleFromDocs(adminSnap.exists, organizerSnap.exists);
   const profile = {
     uid,
     email,
@@ -261,6 +380,7 @@ export const ensureUser = onCall(async (request) => {
 
 export const listAccessibleRooms = onCall(async (request) => {
   const { uid, email } = requireAuth(request);
+  await rateLimit(uid, "listRooms");
 
   type Summary = {
     id: string;
@@ -365,6 +485,7 @@ export const listAccessibleRooms = onCall(async (request) => {
 export const createRoom = onCall(async (request) => {
   const { uid, email } = requireAuth(request);
   await requireOrganizer(uid);
+  await rateLimit(uid, "createRoom");
 
   let slug: string;
   try {
@@ -376,23 +497,32 @@ export const createRoom = onCall(async (request) => {
     );
   }
 
-  const title = String(request.data?.title ?? "").trim();
-  const description = String(request.data?.description ?? "").trim();
+  let title: string;
+  let description: string;
+  try {
+    title = assertRoomTitle(request.data?.title);
+    description = assertRoomDescription(request.data?.description);
+  } catch (err) {
+    throw new HttpsError(
+      "invalid-argument",
+      err instanceof Error ? err.message : "Invalid room fields",
+    );
+  }
   const accessMode = request.data?.accessMode as AccessMode;
   const anonymous = Boolean(request.data?.anonymous);
   const allowlistEmails = (request.data?.allowlistEmails as string[] | undefined) ?? [];
 
-  if (!title) throw new HttpsError("invalid-argument", "Title is required");
   if (!["public", "allowlist", "join_code", "hybrid"].includes(accessMode)) {
     throw new HttpsError("invalid-argument", "Invalid access mode");
   }
-
-  const roomRef = db.collection("rooms").doc(slug);
-  const existing = await roomRef.get();
-  if (existing.exists) {
-    throw new HttpsError("already-exists", "That slug is already taken");
+  if (allowlistEmails.length > MAX_ALLOWLIST_EMAILS) {
+    throw new HttpsError(
+      "invalid-argument",
+      `Allowlist supports at most ${MAX_ALLOWLIST_EMAILS} emails`,
+    );
   }
 
+  const roomRef = db.collection("rooms").doc(slug);
   const needsCode = accessMode === "join_code" || accessMode === "hybrid";
   const createdAt = Date.now();
   const room = {
@@ -411,21 +541,25 @@ export const createRoom = onCall(async (request) => {
     hasJoinCode: false,
   };
 
-  await roomRef.set(room);
+  try {
+    await roomRef.create(room);
+  } catch {
+    throw new HttpsError("already-exists", "That slug is already taken");
+  }
 
   let joinCode: string | undefined;
   if (needsCode) {
     joinCode = await assignJoinCodeToRoom(slug, null);
   }
 
+  const normalizedAllow = Array.from(
+    new Set(allowlistEmails.map(normalizeEmail).filter(Boolean)),
+  ).slice(0, MAX_ALLOWLIST_EMAILS);
+
   if (accessMode === "allowlist" || accessMode === "hybrid") {
     const batch = db.batch();
-    for (const raw of allowlistEmails) {
-      const normalized = normalizeEmail(raw);
-      if (!normalized) continue;
-      const emailRef = db.doc(
-        `roomAllowlists/${slug}/emails/${normalized}`,
-      );
+    for (const normalized of normalizedAllow) {
+      const emailRef = db.doc(`roomAllowlists/${slug}/emails/${normalized}`);
       batch.set(emailRef, {
         email: normalized,
         addedBy: uid,
@@ -446,18 +580,15 @@ export const createRoom = onCall(async (request) => {
     organizerId: uid,
   });
 
-  if (allowlistEmails.length) {
-    for (const raw of allowlistEmails) {
-      const normalized = normalizeEmail(raw);
-      if (!normalized || normalized === email) continue;
-      const users = await db
-        .collection("users")
-        .where("email", "==", normalized)
-        .limit(1)
-        .get();
-      if (!users.empty) {
-        await grantMembership(slug, users.docs[0]!.id, "allowlist");
-      }
+  for (const normalized of normalizedAllow) {
+    if (normalized === email) continue;
+    const users = await db
+      .collection("users")
+      .where("email", "==", normalized)
+      .limit(1)
+      .get();
+    if (!users.empty) {
+      await grantMembership(slug, users.docs[0]!.id, "allowlist");
     }
   }
 
@@ -472,6 +603,7 @@ export const getRoomAccess = onCall(async (request) => {
   const { uid, email } = requireAuth(request);
   const roomId = String(request.data?.roomId ?? "");
   if (!roomId) throw new HttpsError("invalid-argument", "roomId required");
+  await rateLimit(uid, "getRoomAccess");
 
   const ctx = await loadAccessContext(roomId, uid, email);
   const decision = canAccessRoom({
@@ -481,37 +613,73 @@ export const getRoomAccess = onCall(async (request) => {
     isMember: ctx.isMember,
   });
 
-  if (decision.allowed && !ctx.isMember) {
-    const via =
-      ctx.accessMode === "public"
-        ? "public"
-        : ctx.onAllowlist
-          ? "allowlist"
-          : "organizer";
-    await grantMembership(roomId, uid, via === "organizer" && ctx.isOrganizer ? "organizer" : via);
+  // Public rooms: RTDB rules already allow reads — do not sticky-grant membership.
+  if (
+    decision.allowed &&
+    !ctx.isMember &&
+    ctx.accessMode !== "public"
+  ) {
+    const via = ctx.onAllowlist
+      ? "allowlist"
+      : ctx.isOrganizer
+        ? "organizer"
+        : "code";
+    await grantMembership(
+      roomId,
+      uid,
+      via === "organizer" && ctx.isOrganizer ? "organizer" : via,
+    );
   }
 
+  const needsCodeGate = decision.needsJoinCode && !decision.allowed;
   const d = ctx.room;
+
+  // Before join code: only minimal metadata (no description / organizerId).
+  if (needsCodeGate) {
+    return {
+      allowed: false,
+      needsJoinCode: true,
+      isOrganizer: false,
+      room: {
+        id: roomId,
+        slug: (d.slug as string) || roomId,
+        title: d.title,
+        description: "",
+        accessMode: d.accessMode,
+        questionsLocked: Boolean(d.questionsLocked),
+        viewOnly: Boolean(d.viewOnly),
+        anonymous: Boolean(d.anonymous),
+        organizerId: "",
+        createdAt: d.createdAt,
+        status: d.status,
+        hasJoinCode: true,
+      },
+    };
+  }
+
+  if (!decision.allowed) {
+    // Uniform denial (avoid existence oracle vs allowlist).
+    throw new HttpsError("not-found", "Room not found");
+  }
+
   return {
-    allowed: decision.allowed,
-    needsJoinCode: decision.needsJoinCode && !decision.allowed,
+    allowed: true,
+    needsJoinCode: false,
     isOrganizer: ctx.isOrganizer,
-    room: decision.allowed || decision.needsJoinCode
-      ? {
-          id: roomId,
-          slug: (d.slug as string) || roomId,
-          title: d.title,
-          description: d.description ?? "",
-          accessMode: d.accessMode,
-          questionsLocked: d.questionsLocked,
-          viewOnly: d.viewOnly,
-          anonymous: Boolean(d.anonymous),
-          organizerId: d.organizerId,
-          createdAt: d.createdAt,
-          status: d.status,
-          hasJoinCode: Boolean(d.hasJoinCode),
-        }
-      : null,
+    room: {
+      id: roomId,
+      slug: (d.slug as string) || roomId,
+      title: d.title,
+      description: d.description ?? "",
+      accessMode: d.accessMode,
+      questionsLocked: d.questionsLocked,
+      viewOnly: d.viewOnly,
+      anonymous: Boolean(d.anonymous),
+      organizerId: d.organizerId,
+      createdAt: d.createdAt,
+      status: d.status,
+      hasJoinCode: Boolean(d.hasJoinCode),
+    },
   };
 });
 
@@ -533,11 +701,14 @@ export const redeemJoinCode = onCall(async (request) => {
     return { ok: true as const, roomId };
   }
 
+  if (!isValidJoinCodeShape(code)) {
+    throw new HttpsError("permission-denied", "Invalid join code");
+  }
   const stored = normalizeJoinCode(String(ctx.room.joinCode ?? ""));
-  const expectedHash = ctx.room.joinCodeHash as string | null;
+  const expectedHash = String(ctx.room.joinCodeHash ?? "");
   const matches =
-    (stored && stored === code) ||
-    (expectedHash && hashJoinCode(code) === expectedHash);
+    (stored && safeEqualDigits(stored, code)) ||
+    (expectedHash && safeEqualHex(hashJoinCode(code), expectedHash));
   if (!matches) {
     throw new HttpsError("permission-denied", "Invalid join code");
   }
@@ -550,8 +721,11 @@ export const redeemJoinCode = onCall(async (request) => {
 export const joinByCode = onCall(async (request) => {
   const { uid } = requireAuth(request);
   const code = normalizeJoinCode(String(request.data?.code ?? ""));
-  if (code.length < 6) {
-    throw new HttpsError("invalid-argument", "Enter the 6-digit join code");
+  if (!isValidJoinCodeShape(code)) {
+    throw new HttpsError(
+      "invalid-argument",
+      `Enter the ${JOIN_CODE_DIGITS}-digit join code`,
+    );
   }
   await rateLimit(uid, "redeem");
 
@@ -571,6 +745,16 @@ export const joinByCode = onCall(async (request) => {
   const room = roomSnap.data()!;
   if (room.accessMode !== "join_code" && room.accessMode !== "hybrid") {
     throw new HttpsError("failed-precondition", "This room no longer accepts join codes");
+  }
+
+  const stored = normalizeJoinCode(String(room.joinCode ?? ""));
+  const expectedHash = String(room.joinCodeHash ?? "");
+  const matches =
+    (stored && safeEqualDigits(stored, code)) ||
+    (expectedHash && safeEqualHex(hashJoinCode(code), expectedHash));
+  if (!matches) {
+    // Stale index entry after rotate/release failure — do not grant.
+    throw new HttpsError("not-found", "No room found for that code");
   }
 
   await grantMembership(roomId, uid, "code");
@@ -674,7 +858,10 @@ export const createQuestion = onCall(async (request) => {
     createdAt,
   };
   await questionRef.set(question);
-  await mirrorQuestion(roomId, questionRef.id, question);
+  await mirrorQuestion(roomId, questionRef.id, {
+    ...question,
+    anonymous: Boolean(ctx.room.anonymous),
+  });
   return { questionId: questionRef.id };
 });
 
@@ -836,10 +1023,24 @@ export const updateRoomFlags = onCall(async (request) => {
     patch.anonymous = request.data.anonymous;
   }
   if (typeof request.data?.title === "string" && request.data.title.trim()) {
-    patch.title = request.data.title.trim();
+    try {
+      patch.title = assertRoomTitle(request.data.title);
+    } catch (err) {
+      throw new HttpsError(
+        "invalid-argument",
+        err instanceof Error ? err.message : "Invalid title",
+      );
+    }
   }
   if (typeof request.data?.description === "string") {
-    patch.description = request.data.description.trim();
+    try {
+      patch.description = assertRoomDescription(request.data.description);
+    } catch (err) {
+      throw new HttpsError(
+        "invalid-argument",
+        err instanceof Error ? err.message : "Invalid description",
+      );
+    }
   }
   if (
     request.data?.accessMode &&
@@ -866,6 +1067,11 @@ export const updateRoomFlags = onCall(async (request) => {
     });
   }
 
+  const prevMode = room.accessMode as AccessMode;
+  if (prevMode === "public" && nextMode !== "public") {
+    await revokePublicViaMembers(roomId, room.organizerId as string);
+  }
+
   const nextSnap = await roomRef.get();
   const next = nextSnap.data()!;
   await mirrorRoomMeta(roomId, {
@@ -888,10 +1094,17 @@ export const setAllowlist = onCall(async (request) => {
   const roomId = String(request.data?.roomId ?? "");
   const emails = (request.data?.emails as string[] | undefined) ?? [];
   if (!roomId) throw new HttpsError("invalid-argument", "roomId required");
+  if (emails.length > MAX_ALLOWLIST_EMAILS) {
+    throw new HttpsError(
+      "invalid-argument",
+      `Allowlist supports at most ${MAX_ALLOWLIST_EMAILS} emails`,
+    );
+  }
 
   const roomSnap = await db.doc(`rooms/${roomId}`).get();
   if (!roomSnap.exists) throw new HttpsError("not-found", "Room not found");
-  if (roomSnap.data()!.organizerId !== uid) {
+  const room = roomSnap.data()!;
+  if (room.organizerId !== uid) {
     throw new HttpsError("permission-denied", "Only the organizer can edit allowlist");
   }
 
@@ -901,7 +1114,7 @@ export const setAllowlist = onCall(async (request) => {
   existing.docs.forEach((d) => batch.delete(d.ref));
   const normalized = Array.from(
     new Set(emails.map(normalizeEmail).filter(Boolean)),
-  );
+  ).slice(0, MAX_ALLOWLIST_EMAILS);
   for (const email of normalized) {
     batch.set(col.doc(email), {
       email,
@@ -910,6 +1123,9 @@ export const setAllowlist = onCall(async (request) => {
     });
   }
   await batch.commit();
+
+  const allowed = new Set(normalized);
+  await revokeStaleAllowlistMembers(roomId, room.organizerId as string, allowed);
 
   for (const email of normalized) {
     const users = await db.collection("users").where("email", "==", email).limit(1).get();
@@ -990,7 +1206,8 @@ export const exportQuestions = onCall(async (request) => {
 
 export const promoteUser = onCall(async (request) => {
   const { uid } = requireAuth(request);
-  await requireOrganizer(uid);
+  await requireAdmin(uid);
+  await rateLimit(uid, "promoteUser");
 
   const targetUid = String(request.data?.uid ?? "").trim();
   const targetEmail = normalizeEmail(String(request.data?.email ?? ""));
@@ -1016,11 +1233,16 @@ export const promoteUser = onCall(async (request) => {
     displayName = users.docs[0]!.data().displayName as string | undefined;
   } else {
     const userSnap = await db.doc(`users/${resolvedUid}`).get();
-    if (userSnap.exists) {
-      resolvedEmail =
-        (userSnap.data()?.email as string) || resolvedEmail || "";
-      displayName = userSnap.data()?.displayName as string | undefined;
+    if (!userSnap.exists) {
+      throw new HttpsError("not-found", "User has not signed in yet");
     }
+    resolvedEmail =
+      (userSnap.data()?.email as string) || resolvedEmail || "";
+    displayName = userSnap.data()?.displayName as string | undefined;
+  }
+
+  if (await isAdminUid(resolvedUid)) {
+    throw new HttpsError("failed-precondition", "User is already a super admin");
   }
 
   await grantOrganizer(resolvedUid, {
@@ -1033,7 +1255,8 @@ export const promoteUser = onCall(async (request) => {
 
 export const demoteUser = onCall(async (request) => {
   const { uid } = requireAuth(request);
-  await requireOrganizer(uid);
+  await requireAdmin(uid);
+  await rateLimit(uid, "demoteUser");
   const targetUid = String(request.data?.uid ?? "").trim();
   if (!targetUid) {
     throw new HttpsError("invalid-argument", "uid required");
@@ -1041,9 +1264,102 @@ export const demoteUser = onCall(async (request) => {
   if (targetUid === uid) {
     throw new HttpsError("failed-precondition", "Cannot demote yourself");
   }
+  if (await isAdminUid(targetUid)) {
+    throw new HttpsError("failed-precondition", "Cannot demote a super admin");
+  }
   await db.doc(`organizers/${targetUid}`).delete();
   await db.doc(`users/${targetUid}`).set({ role: "attendee" }, { merge: true });
   return { ok: true as const };
+});
+
+/** Super-admin overview: every room + organizer roster. */
+export const listAdminDashboard = onCall(async (request) => {
+  const { uid } = requireAuth(request);
+  await requireAdmin(uid);
+  await rateLimit(uid, "listAdminDashboard");
+
+  const [roomsSnap, organizersSnap, adminsSnap] = await Promise.all([
+    db.collection("rooms").orderBy("createdAt", "desc").limit(300).get(),
+    db.collection("organizers").get(),
+    db.collection("admins").get(),
+  ]);
+
+  const adminUids = new Set(adminsSnap.docs.map((d) => d.id));
+  const organizerByUid = new Map(
+    organizersSnap.docs.map((d) => [d.id, d.data()] as const),
+  );
+
+  const rooms = await Promise.all(
+    roomsSnap.docs.map(async (docSnap) => {
+      const d = docSnap.data();
+      const organizerId = String(d.organizerId ?? "");
+      const orgMeta = organizerByUid.get(organizerId);
+      const userSnap = orgMeta
+        ? null
+        : organizerId
+          ? await db.doc(`users/${organizerId}`).get()
+          : null;
+      const [questionsSnap, membersSnap] = await Promise.all([
+        db.collection(`questions/${docSnap.id}/items`).get(),
+        db.collection(`roomMembers/${docSnap.id}/members`).select().get(),
+      ]);
+      let voteTotal = 0;
+      for (const q of questionsSnap.docs) {
+        voteTotal += Number(q.data().voteCount ?? 0);
+      }
+      return {
+        id: docSnap.id,
+        slug: String(d.slug ?? docSnap.id),
+        title: String(d.title ?? docSnap.id),
+        description: String(d.description ?? ""),
+        accessMode: d.accessMode as AccessMode,
+        questionsLocked: Boolean(d.questionsLocked),
+        viewOnly: Boolean(d.viewOnly),
+        anonymous: Boolean(d.anonymous),
+        organizerId,
+        organizerEmail:
+          (orgMeta?.email as string | undefined) ||
+          (userSnap?.data()?.email as string | undefined) ||
+          "",
+        organizerName:
+          (orgMeta?.displayName as string | undefined) ||
+          (userSnap?.data()?.displayName as string | undefined) ||
+          "",
+        createdAt: Number(d.createdAt ?? 0),
+        status: (d.status as string) || "open",
+        questionCount: questionsSnap.size,
+        memberCount: membersSnap.size,
+        voteTotal,
+      };
+    }),
+  );
+
+  const organizers = organizersSnap.docs
+    .filter((d) => !adminUids.has(d.id))
+    .map((d) => {
+      const data = d.data();
+      return {
+        uid: d.id,
+        email: String(data.email ?? ""),
+        displayName: String(data.displayName ?? ""),
+        grantedAt: Number(data.grantedAt ?? 0),
+        grantedBy: String(data.grantedBy ?? ""),
+      };
+    })
+    .sort((a, b) => a.email.localeCompare(b.email));
+
+  const admins = adminsSnap.docs.map((d) => {
+    const data = d.data();
+    return {
+      uid: d.id,
+      email: String(data.email ?? ""),
+      displayName: String(data.displayName ?? ""),
+      grantedAt: Number(data.grantedAt ?? 0),
+      grantedBy: String(data.grantedBy ?? ""),
+    };
+  });
+
+  return { rooms, organizers, admins };
 });
 
 async function deleteQueryInBatches(
@@ -1072,10 +1388,11 @@ export const deleteRoom = onCall(async (request) => {
   const roomSnap = await roomRef.get();
   if (!roomSnap.exists) throw new HttpsError("not-found", "Room not found");
   const room = roomSnap.data()!;
-  if (room.organizerId !== uid) {
+  const isOwner = room.organizerId === uid;
+  if (!isOwner && !(await isAdminUid(uid))) {
     throw new HttpsError(
       "permission-denied",
-      "Only the room organizer can delete this room",
+      "Only the room organizer or super admin can delete this room",
     );
   }
 

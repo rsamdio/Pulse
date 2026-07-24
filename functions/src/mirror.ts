@@ -49,19 +49,24 @@ export async function mirrorQuestion(
     createdAt: number;
     answered?: boolean;
     answeredAt?: number | null;
+    /** When true, omit authorId from the public RTDB mirror. */
+    anonymous?: boolean;
   },
 ): Promise<void> {
   try {
-    await rtdb().ref(`rooms/${roomId}/questions/${questionId}`).set({
+    const payload: Record<string, unknown> = {
       question: question.question,
       details: question.details || "",
       authorName: question.authorName,
-      authorId: question.authorId,
       voteCount: question.voteCount,
       createdAt: question.createdAt,
       answered: Boolean(question.answered),
       answeredAt: question.answeredAt ?? null,
-    });
+    };
+    if (!question.anonymous) {
+      payload.authorId = question.authorId;
+    }
+    await rtdb().ref(`rooms/${roomId}/questions/${questionId}`).set(payload);
   } catch (error) {
     await recordMirrorFailure("question", `${roomId}/${questionId}`, error);
     throw error;

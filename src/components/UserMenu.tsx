@@ -1,10 +1,11 @@
 "use client";
 
 import { useEffect, useId, useRef, useState } from "react";
+import Link from "next/link";
 import { useAuth } from "@/contexts/AuthContext";
 
 export function UserMenu() {
-  const { user, profile, signOut, isOrganizer } = useAuth();
+  const { user, profile, signOut, isOrganizer, isAdmin } = useAuth();
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const menuId = useId();
@@ -31,6 +32,7 @@ export function UserMenu() {
   const email = profile?.email ?? user.email ?? "";
   const photo = user.photoURL;
   const initial = name.trim().charAt(0).toUpperCase() || "U";
+  const roleLabel = isAdmin ? "Admin" : isOrganizer ? "Organizer" : "Attendee";
 
   return (
     <div className="user-menu" ref={rootRef}>
@@ -58,10 +60,18 @@ export function UserMenu() {
           <div className="user-menu-identity">
             <p className="user-menu-name">{name}</p>
             {email ? <p className="user-menu-email">{email}</p> : null}
-            <span className="badge badge-pink mt-2">
-              {isOrganizer ? "Organizer" : "Attendee"}
-            </span>
+            <span className="badge badge-pink mt-2">{roleLabel}</span>
           </div>
+          {isAdmin ? (
+            <Link
+              href="/admin"
+              className="user-menu-item"
+              role="menuitem"
+              onClick={() => setOpen(false)}
+            >
+              Admin console
+            </Link>
+          ) : null}
           <button
             type="button"
             className="user-menu-item"

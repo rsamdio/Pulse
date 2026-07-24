@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { RequireAuth } from "@/components/RequireAuth";
 import { RoomListBadge, AccessBadge } from "@/components/AccessBadge";
@@ -14,22 +14,27 @@ function RoomsContent() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
-  const load = useCallback(async () => {
+  useEffect(() => {
+    let cancelled = false;
     setLoading(true);
     setError(null);
-    try {
-      const res = await api.listAccessibleRooms();
-      setRooms(res.rooms);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load rooms");
-    } finally {
-      setLoading(false);
-    }
+    void api
+      .listAccessibleRooms()
+      .then((res) => {
+        if (cancelled) return;
+        setRooms(res.rooms);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setError(err instanceof Error ? err.message : "Failed to load rooms");
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
 
   return (
     <div className="mx-auto w-full max-w-6xl">

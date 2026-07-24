@@ -1,11 +1,18 @@
 export type AccessMode = "public" | "allowlist" | "join_code" | "hybrid";
-export type UserRole = "organizer" | "attendee";
+export type UserRole = "admin" | "organizer" | "attendee";
 
 export function normalizeEmail(email: string): string {
   return email.trim().toLowerCase();
 }
 
-/** Role is driven by whether an `organizers/{uid}` doc exists (or first-boot claim). */
+/** Role priority: admin > organizer > attendee. */
+export function roleFromDocs(isAdmin: boolean, isOrganizer: boolean): UserRole {
+  if (isAdmin) return "admin";
+  if (isOrganizer) return "organizer";
+  return "attendee";
+}
+
+/** @deprecated Prefer roleFromDocs */
 export function roleFromOrganizerDoc(isOrganizerDoc: boolean): UserRole {
   return isOrganizerDoc ? "organizer" : "attendee";
 }
@@ -42,14 +49,36 @@ export const MAX_DESCRIPTION_LENGTH = 1000;
 /** @deprecated Use MAX_DESCRIPTION_LENGTH */
 export const MAX_DETAILS_LENGTH = MAX_DESCRIPTION_LENGTH;
 export const MAX_TITLE_LENGTH = 120;
+export const MAX_ROOM_DESCRIPTION_LENGTH = 2000;
 export const MAX_SLUG_LENGTH = 64;
+export const MAX_ALLOWLIST_EMAILS = 500;
+/** 6-digit codes ≈ 900k space; uniqueness enforced via joinCodes index. */
+export const JOIN_CODE_DIGITS = 6;
+
 export const RATE_LIMIT_MS = {
   question: 3000,
-  vote: 500,
+  vote: 400,
   redeem: 2000,
-  deleteQuestion: 1000,
-  setQuestionAnswered: 500,
+  deleteQuestion: 800,
+  setQuestionAnswered: 400,
+  /** 0 = no gap; list/read callables must tolerate React Strict Mode + remounts. */
+  listRooms: 0,
+  listAdminDashboard: 0,
+  getRoomAccess: 0,
+  createRoom: 4000,
+  ensureUser: 0,
+  promoteUser: 1500,
+  demoteUser: 1500,
 };
+
+/** Digits only — attendees type what they see on screen. */
+export function normalizeJoinCode(raw: string): string {
+  return String(raw ?? "").replace(/\D/g, "");
+}
+
+export function isValidJoinCodeShape(code: string): boolean {
+  return new RegExp(`^\\d{${JOIN_CODE_DIGITS}}$`).test(code);
+}
 
 /** Lowercase letters, numbers, hyphens; 3–64 chars; not starting/ending with hyphen. */
 export function normalizeSlug(raw: string): string {
@@ -76,6 +105,28 @@ export function assertSlug(raw: unknown): string {
     throw new Error("Slug may only use letters, numbers, and hyphens");
   }
   return slug;
+}
+
+export function assertRoomTitle(raw: unknown): string {
+  if (typeof raw !== "string") throw new Error("Title is required");
+  const title = raw.trim();
+  if (!title) throw new Error("Title is required");
+  if (title.length > MAX_TITLE_LENGTH) {
+    throw new Error(`Title must be at most ${MAX_TITLE_LENGTH} characters`);
+  }
+  return title;
+}
+
+export function assertRoomDescription(raw: unknown): string {
+  if (raw == null) return "";
+  if (typeof raw !== "string") throw new Error("Invalid description");
+  const description = raw.trim();
+  if (description.length > MAX_ROOM_DESCRIPTION_LENGTH) {
+    throw new Error(
+      `Description must be at most ${MAX_ROOM_DESCRIPTION_LENGTH} characters`,
+    );
+  }
+  return description;
 }
 
 /**
@@ -111,4 +162,13 @@ export function assertQuestionFields(input: {
   }
 
   return { question, details };
+}
+
+/** Prefix formula-like CSV cells so Excel does not execute them. */
+export function sanitizeCsvCell(value: string): string {
+  const trimmed = value.trim();
+  if (/^[=+\-@\t\r]/.test(trimmed)) {
+    return `'${value}`;
+  }
+  return value;
 }
