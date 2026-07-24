@@ -1,3 +1,5 @@
+[![Netlify Status](https://api.netlify.com/api/v1/badges/5d9e92c5-364e-4e7d-9a30-fe6609b8eb17/deploy-status)](https://app.netlify.com/projects/rotaractpulse/deploys)
+
 # Pulse · Live Room Q&A
 
 Live rooms where attendees ask questions and upvote the ones that matter.  
