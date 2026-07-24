@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import Script from "next/script";
 import { Bodoni_Moda, Hanken_Grotesk } from "next/font/google";
 import { AuthProvider } from "@/contexts/AuthContext";
 import { AppHeader } from "@/components/AppHeader";
@@ -94,6 +95,18 @@ export default function RootLayout({
   return (
     <html lang="en" className={`${display.variable} ${body.variable} h-full`}>
       <body className="app-shell">
+        <Script
+          src="https://www.googletagmanager.com/gtag/js?id=G-F2FEXLW09J"
+          strategy="afterInteractive"
+        />
+        <Script id="google-analytics" strategy="afterInteractive">
+          {`
+            window.dataLayer = window.dataLayer || [];
+            function gtag(){dataLayer.push(arguments);}
+            gtag('js', new Date());
+            gtag('config', 'G-F2FEXLW09J');
+          `}
+        </Script>
         <AuthProvider>
           <AppHeader />
           <main className="app-main">{children}</main>

@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 import { LegalPage } from "@/components/LegalPage";
 import { pageTitle } from "@/lib/branding";
 
@@ -17,11 +18,12 @@ export const metadata: Metadata = {
 
 export default function TermsPage() {
   return (
-    <LegalPage title="Terms of Service" updated="23 July 2026">
+    <LegalPage title="Terms of Service" updated="24 July 2026">
       <p>
         Pulse is a live room Q&A product owned and operated by{" "}
         <strong>Rotaract South Asia MDIO (RSAMDIO)</strong>. By signing in and
-        using Pulse, you agree to these terms.
+        using Pulse, you agree to these terms and our{" "}
+        <Link href="/privacy">Privacy Policy</Link>.
       </p>
 
       <h2>Using Pulse</h2>
@@ -50,6 +52,12 @@ export default function TermsPage() {
         Do not post unlawful, harassing, or abusive content. Do not attempt to
         disrupt rooms, bypass access controls, scrape data, or misuse the
         service. RSAMDIO may suspend access if these terms are violated.
+      </p>
+
+      <h2>Analytics</h2>
+      <p>
+        Pulse uses Google Analytics to measure site usage and improve the
+        product. Details are in the Privacy Policy.
       </p>
 
       <h2>Availability</h2>
