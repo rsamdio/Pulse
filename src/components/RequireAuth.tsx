@@ -3,7 +3,7 @@
 import { useEffect, type ReactNode } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { useAuth } from "@/contexts/AuthContext";
-import { rememberReturnTo } from "@/lib/auth-redirect";
+import { rememberReturnTo, shouldRememberReturnPath } from "@/lib/auth-redirect";
 
 export function RequireAuth({
   children,
@@ -21,8 +21,17 @@ export function RequireAuth({
   useEffect(() => {
     if (loading) return;
     if (!user) {
-      rememberReturnTo(pathname);
-      router.replace(`/?next=${encodeURIComponent(pathname)}`);
+      const search =
+        typeof window !== "undefined"
+          ? window.location.search.replace(/^\?/, "")
+          : "";
+      const fullPath = search ? `${pathname}?${search}` : pathname;
+      rememberReturnTo(fullPath);
+      if (shouldRememberReturnPath(fullPath)) {
+        router.replace(`/?next=${encodeURIComponent(fullPath)}`);
+      } else {
+        router.replace("/");
+      }
       return;
     }
     if (adminOnly && !isAdmin) {

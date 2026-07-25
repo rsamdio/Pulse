@@ -1,16 +1,23 @@
 "use client";
 
-import { useState, type FormEvent } from "react";
-import { useRouter } from "next/navigation";
+import { Suspense, useEffect, useState, type FormEvent } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { RequireAuth } from "@/components/RequireAuth";
 import { api } from "@/lib/api";
+import { parseJoinCodeParam } from "@/lib/auth-redirect";
 
 function JoinByCodeForm() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const [code, setCode] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    const fromQuery = parseJoinCodeParam(searchParams.get("code"));
+    if (fromQuery) setCode(fromQuery);
+  }, [searchParams]);
 
   const onSubmit = async (e: FormEvent) => {
     e.preventDefault();
@@ -76,7 +83,15 @@ function JoinByCodeForm() {
 export default function JoinPage() {
   return (
     <RequireAuth>
-      <JoinByCodeForm />
+      <Suspense
+        fallback={
+          <p className="mt-16 text-center text-sm text-[var(--ink-muted)]">
+            Loading…
+          </p>
+        }
+      >
+        <JoinByCodeForm />
+      </Suspense>
     </RequireAuth>
   );
 }

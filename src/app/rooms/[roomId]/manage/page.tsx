@@ -61,6 +61,7 @@ function ManageRoom() {
   const [rotateOpen, setRotateOpen] = useState(false);
   const [rotating, setRotating] = useState(false);
   const [linkCopied, setLinkCopied] = useState(false);
+  const [inviteCopied, setInviteCopied] = useState(false);
   const [codeCopied, setCodeCopied] = useState(false);
   const [codeFlash, setCodeFlash] = useState<string | null>(null);
 
@@ -112,6 +113,12 @@ function ManageRoom() {
   }, [linkCopied]);
 
   useEffect(() => {
+    if (!inviteCopied) return;
+    const id = window.setTimeout(() => setInviteCopied(false), 2000);
+    return () => window.clearTimeout(id);
+  }, [inviteCopied]);
+
+  useEffect(() => {
     if (!codeCopied) return;
     const id = window.setTimeout(() => setCodeCopied(false), 2000);
     return () => window.clearTimeout(id);
@@ -127,6 +134,15 @@ function ManageRoom() {
     const ok = await copyText(`${window.location.origin}${roomPath}`);
     if (ok) setLinkCopied(true);
     else setError("Could not copy link");
+  };
+
+  const copyInviteLink = async () => {
+    if (!joinCode) return;
+    const ok = await copyText(
+      `${window.location.origin}/join?code=${joinCode}`,
+    );
+    if (ok) setInviteCopied(true);
+    else setError("Could not copy invite link");
   };
 
   const copyEntryCode = async () => {
@@ -292,80 +308,103 @@ function ManageRoom() {
         <h2 className="font-[family-name:var(--font-display)] text-xl font-semibold">
           Share access
         </h2>
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-          <code className="min-w-0 flex-1 truncate rounded-xl border border-[var(--line)] bg-[var(--surface-low)] px-3 py-2.5 font-mono text-xs text-[var(--secondary)]">
-            {roomPath}
-          </code>
-          <button
-            type="button"
-            className="btn btn-outline btn-sm shrink-0"
-            onClick={() => void copyRoomLink()}
-          >
-            {linkCopied ? "Copied" : "Copy link"}
-          </button>
-        </div>
-        {linkCopied ? (
-          <p className="text-xs font-medium text-[var(--ok)]" aria-live="polite">
-            Room link copied to clipboard
+
+        <div className="space-y-1.5">
+          <span className="label-caps">Room link</span>
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+            <code className="min-w-0 flex-1 truncate rounded-xl border border-[var(--line)] bg-[var(--surface-low)] px-3 py-2.5 font-mono text-xs text-[var(--secondary)]">
+              {roomPath}
+            </code>
+            <button
+              type="button"
+              className="btn btn-outline btn-sm shrink-0"
+              onClick={() => void copyRoomLink()}
+            >
+              {linkCopied ? "Copied" : "Copy room link"}
+            </button>
+          </div>
+          <p className="text-xs text-[var(--ink-muted)]">
+            Opens the room directly. Best for public rooms or people already on
+            the invite list.
           </p>
-        ) : null}
+        </div>
 
         {usesCode ? (
-          <div className="rounded-xl border border-[var(--line)] bg-[var(--surface-low)] p-4 space-y-3">
-            <span className="label-caps">6-digit entry code</span>
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <p className="code-display m-0">
-                {joinCode
-                  ? codeVisible
-                    ? `${joinCode.slice(0, 3)} ${joinCode.slice(3)}`
-                    : "••• •••"
-                  : "······"}
-              </p>
-              <div className="flex shrink-0 gap-2">
+          <>
+            <div className="space-y-1.5">
+              <span className="label-caps">6-digit entry code</span>
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                <div className="min-w-0 flex-1 rounded-xl border border-[var(--line)] bg-[var(--surface-low)] px-4 py-3">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <p className="code-display m-0">
+                      {joinCode
+                        ? codeVisible
+                          ? `${joinCode.slice(0, 3)} ${joinCode.slice(3)}`
+                          : "••• •••"
+                        : "······"}
+                    </p>
+                    <div className="flex shrink-0 gap-2">
+                      <button
+                        type="button"
+                        className="btn btn-outline btn-sm"
+                        onClick={() => setCodeVisible((v) => !v)}
+                      >
+                        {codeVisible ? "Hide" : "Show"}
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-outline btn-sm"
+                        disabled={busy || rotating}
+                        onClick={() => setRotateOpen(true)}
+                      >
+                        Rotate
+                      </button>
+                    </div>
+                  </div>
+                </div>
                 <button
                   type="button"
-                  className="btn btn-outline btn-sm"
-                  onClick={() => setCodeVisible((v) => !v)}
+                  className="btn btn-outline btn-sm shrink-0"
+                  disabled={!joinCode || busy}
+                  onClick={() => void copyEntryCode()}
                 >
-                  {codeVisible ? "Hide" : "Show"}
-                </button>
-                <button
-                  type="button"
-                  className="btn btn-outline btn-sm"
-                  disabled={busy || rotating}
-                  onClick={() => setRotateOpen(true)}
-                >
-                  Rotate
+                  {codeCopied ? "Copied" : "Copy entry code"}
                 </button>
               </div>
-            </div>
-            <div className="flex flex-wrap items-center gap-2">
-              <button
-                type="button"
-                className="btn btn-primary btn-sm"
-                disabled={!joinCode || busy}
-                onClick={() => void copyEntryCode()}
-              >
-                {codeCopied ? "Copied" : "Copy code"}
-              </button>
-              {codeCopied ? (
-                <span
-                  className="text-xs font-medium text-[var(--ok)]"
+              <p className="text-xs text-[var(--ink-muted)]">
+                Just the digits, for slides or reading aloud.
+              </p>
+              {codeFlash ? (
+                <p
+                  className="text-xs font-medium text-[var(--ink-soft)]"
                   aria-live="polite"
                 >
-                  Entry code copied
-                </span>
+                  {codeFlash}
+                </p>
               ) : null}
             </div>
-            {codeFlash ? (
-              <p
-                className="text-xs font-medium text-[var(--ink-soft)]"
-                aria-live="polite"
-              >
-                {codeFlash}
+
+            <div className="space-y-1.5">
+              <span className="label-caps">Invite link</span>
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                <code className="min-w-0 flex-1 truncate rounded-xl border border-[var(--line)] bg-[var(--surface-low)] px-3 py-2.5 font-mono text-xs text-[var(--secondary)]">
+                  {joinCode ? `/join?code=${joinCode}` : "/join?code=······"}
+                </code>
+                <button
+                  type="button"
+                  className="btn btn-primary btn-sm shrink-0"
+                  disabled={!joinCode || busy}
+                  onClick={() => void copyInviteLink()}
+                >
+                  {inviteCopied ? "Copied" : "Copy invite link"}
+                </button>
+              </div>
+              <p className="text-xs text-[var(--ink-muted)]">
+                Opens Join with the code already filled in. Best for sharing
+                with attendees.
               </p>
-            ) : null}
-          </div>
+            </div>
+          </>
         ) : null}
       </section>
 

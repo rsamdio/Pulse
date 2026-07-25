@@ -16,11 +16,13 @@ function HomeContent() {
   const [error, setError] = useState<string | null>(null);
 
   const nextParam = searchParams.get("next");
+  const pendingTarget =
+    nextParam && isSafeReturnPath(nextParam) ? nextParam : null;
+  const pendingInvite =
+    pendingTarget != null && pendingTarget.startsWith("/join");
   const pendingRoom =
-    nextParam &&
-    isSafeReturnPath(nextParam) &&
-    nextParam.startsWith("/rooms/")
-      ? nextParam
+    pendingTarget != null && pendingTarget.startsWith("/rooms/")
+      ? pendingTarget
       : null;
 
   useEffect(() => {
@@ -58,9 +60,11 @@ function HomeContent() {
           Live rooms
         </p>
         <p className="mt-3 text-sm leading-relaxed text-[var(--ink-soft)]">
-          {pendingRoom
-            ? "Sign in to open the room you were invited to."
-            : "Live rooms for events and sessions. Organizers open a room; you sign in with Google to ask and upvote questions, or answer polls and short prompts on Engage."}
+          {pendingInvite
+            ? "Sign in to join the room with your invite code."
+            : pendingRoom
+              ? "Sign in to open the room you were invited to."
+              : "Live rooms for events and sessions. Organizers open a room; you sign in with Google to ask and upvote questions, or answer polls and short prompts on Engage."}
         </p>
 
         {pendingRoom ? (

@@ -2,10 +2,13 @@
 
 import { useEffect, useId, useRef, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useAuth } from "@/contexts/AuthContext";
+import { clearReturnTo } from "@/lib/auth-redirect";
 
 export function UserMenu() {
   const { user, profile, signOut, isOrganizer, isAdmin } = useAuth();
+  const router = useRouter();
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const menuId = useId();
@@ -78,7 +81,10 @@ export function UserMenu() {
             role="menuitem"
             onClick={() => {
               setOpen(false);
-              void signOut();
+              clearReturnTo();
+              void signOut().then(() => {
+                router.replace("/");
+              });
             }}
           >
             Sign out
