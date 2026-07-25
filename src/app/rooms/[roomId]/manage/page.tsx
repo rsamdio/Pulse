@@ -56,6 +56,8 @@ function ManageRoom() {
   const [busy, setBusy] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [rotateOpen, setRotateOpen] = useState(false);
+  const [rotating, setRotating] = useState(false);
   const [linkCopied, setLinkCopied] = useState(false);
   const [codeCopied, setCodeCopied] = useState(false);
   const [codeFlash, setCodeFlash] = useState<string | null>(null);
@@ -182,7 +184,7 @@ function ManageRoom() {
   };
 
   const rotateCode = async () => {
-    setBusy(true);
+    setRotating(true);
     setError(null);
     try {
       const res = await api.rotateJoinCode({ roomId });
@@ -190,10 +192,12 @@ function ManageRoom() {
       setCodeVisible(true);
       setCodeCopied(false);
       setCodeFlash("New code ready. The old code no longer works.");
+      setRotateOpen(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not rotate code");
+      setRotateOpen(false);
     } finally {
-      setBusy(false);
+      setRotating(false);
     }
   };
 
@@ -326,8 +330,8 @@ function ManageRoom() {
                 <button
                   type="button"
                   className="btn btn-outline btn-sm"
-                  disabled={busy}
-                  onClick={() => void rotateCode()}
+                  disabled={busy || rotating}
+                  onClick={() => setRotateOpen(true)}
                 >
                   Rotate
                 </button>
@@ -474,6 +478,29 @@ function ManageRoom() {
           Delete this room
         </button>
       </section>
+
+      <ConfirmDialog
+        open={rotateOpen}
+        title="Rotate entry code?"
+        description={
+          <>
+            <p className="mb-2">
+              A new 6-digit code will replace the current one right away.
+            </p>
+            <p>
+              Anyone who has the old code will not be able to join until you
+              share the new one. People already in the room stay in.
+            </p>
+          </>
+        }
+        confirmLabel="Rotate code"
+        cancelLabel="Keep current code"
+        busy={rotating}
+        onCancel={() => {
+          if (!rotating) setRotateOpen(false);
+        }}
+        onConfirm={() => void rotateCode()}
+      />
 
       <ConfirmDialog
         open={deleteOpen}
