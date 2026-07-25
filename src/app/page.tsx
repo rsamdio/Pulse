@@ -67,9 +67,9 @@ function HomeContent() {
               : "Live rooms for events and sessions. Organizers open a room; you sign in with Google to ask and upvote questions, or answer polls and short prompts on Engage."}
         </p>
 
-        {pendingRoom ? (
-          <p className="mt-4 rounded-xl border border-[var(--line)] bg-[var(--surface-low)] px-3 py-2 font-mono text-xs text-[var(--ink-soft)]">
-            Continue to {pendingRoom}
+        {pendingTarget ? (
+          <p className="mt-4 break-all rounded-xl border border-[var(--line)] bg-[var(--surface-low)] px-3 py-2 font-mono text-xs text-[var(--ink-soft)]">
+            Continue to {pendingTarget}
           </p>
         ) : null}
 
