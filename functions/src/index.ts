@@ -1,8 +1,12 @@
 import * as admin from "firebase-admin";
+import { getFunctions } from "firebase-admin/functions";
 import { createHash, randomBytes, timingSafeEqual } from "crypto";
 import { onCall, HttpsError, type CallableRequest } from "firebase-functions/v2/https";
+import { onTaskDispatched } from "firebase-functions/v2/tasks";
 import { setGlobalOptions } from "firebase-functions/v2";
 import {
+  assertAutoAdvance,
+  assertDurationSec,
   assertEngagementPrompt,
   assertEngagementType,
   assertMcqOptions,
@@ -13,18 +17,27 @@ import {
   assertRoomTitle,
   assertSlug,
   canAccessRoom,
+  engagementSortOrder,
+  GRACE_MS,
   isValidJoinCodeShape,
   JOIN_CODE_DIGITS,
   MAX_ALLOWLIST_EMAILS,
+  MAX_ENGAGEMENT_DRAFTS,
+  nextDraftId,
   normalizeEmail,
   normalizeJoinCode,
   RATE_LIMIT_MS,
   roleFromDocs,
+  evaluateExpireGuards,
+  shouldPublicTallies,
+  shouldWritePrivateTallies,
   topPhrasesFromMap,
   type AccessMode,
+  type EngagePhase,
   type EngagementResultsVisibility,
   type EngagementStatus,
   type EngagementType,
+  type ExpireNoopReason,
   type UserRole,
 } from "./logic";
 import {
@@ -38,9 +51,12 @@ import {
   mirrorQuestionAnswered,
   removeMirroredRoom,
   clearMirroredMemberAccess,
-  mirrorEngagement,
+  mirrorPlatformAdmin,
+  mirrorEngagementLifecycle,
+  mirrorEngagementResponseUpdate,
   removeMirroredEngagement,
-  mirrorUserEngagementResponse,
+  mirrorDraftQueue,
+  mirrorEngageControl,
   clearUserEngagementResponse,
 } from "./mirror";
 
@@ -115,6 +131,7 @@ async function grantAdmin(
     { role: "admin" satisfies UserRole },
     { merge: true },
   );
+  await mirrorPlatformAdmin(targetUid, true);
 }
 
 async function grantOrganizer(
@@ -366,6 +383,13 @@ export const ensureUser = onCall(async (request) => {
     createdAt: userSnap.data()?.createdAt ?? Date.now(),
   };
   await userRef.set(profile, { merge: true });
+
+  // Self-heal RTDB platformAdmins (set when admin, clear when not).
+  try {
+    await mirrorPlatformAdmin(uid, adminSnap.exists);
+  } catch {
+    // best-effort; private Peek may fail until next ensureUser
+  }
 
   // Allowlist sync is expensive (collection group). Only on first login or explicit sync.
   if (isNewUser || forceSyncAllowlist) {
@@ -1466,15 +1490,52 @@ async function deleteQueryInBatches(
   return deleted;
 }
 
+type EngageControlDoc = {
+  generation: number;
+  phase: EngagePhase;
+  activeEngagementId: string | null;
+  reservedNextId: string | null;
+  liveEndsAt: number | null;
+  advanceAt: number | null;
+  queueVersion: number;
+};
+
+function defaultEngageControl(): EngageControlDoc {
+  return {
+    generation: 0,
+    phase: "idle",
+    activeEngagementId: null,
+    reservedNextId: null,
+    liveEndsAt: null,
+    advanceAt: null,
+    queueVersion: 0,
+  };
+}
+
+function nextRevision(data: FirebaseFirestore.DocumentData): number {
+  return Number(data.revision ?? 0) + 1;
+}
+
 function engagementMirrorPayload(
   data: FirebaseFirestore.DocumentData,
 ): Record<string, unknown> {
   const type = data.type as EngagementType;
+  const status = data.status as EngagementStatus;
+  const resultsVisibility =
+    (data.resultsVisibility as EngagementResultsVisibility) || "live";
+  const resultsRevealed = Boolean(data.resultsRevealed);
   const payload: Record<string, unknown> = {
     type,
     prompt: data.prompt,
-    status: data.status as EngagementStatus,
-    resultsVisibility: (data.resultsVisibility as EngagementResultsVisibility) || "live",
+    status,
+    resultsVisibility,
+    resultsRevealed,
+    revision: Number(data.revision ?? 0),
+    sortOrder: engagementSortOrder(data),
+    durationSec: data.durationSec ?? null,
+    autoAdvance: Boolean(data.autoAdvance),
+    liveEndsAt: data.liveEndsAt ?? null,
+    liveStartedAt: data.liveStartedAt ?? null,
     responseCount: Number(data.responseCount ?? 0),
     createdAt: Number(data.createdAt ?? 0),
     closedAt: data.closedAt ?? null,
@@ -1482,11 +1543,36 @@ function engagementMirrorPayload(
   };
   if (type === "mcq") {
     payload.options = data.options ?? [];
-    payload.optionCounts = data.optionCounts ?? {};
+  }
+  if (shouldPublicTallies(resultsVisibility, status, resultsRevealed)) {
+    if (type === "mcq") {
+      payload.optionCounts = data.optionCounts ?? {};
+    } else {
+      payload.phrases = data.phrases ?? [];
+    }
+  } else if (type === "mcq") {
+    payload.optionCounts = {};
   } else {
-    payload.phrases = data.phrases ?? [];
+    payload.phrases = [];
   }
   return payload;
+}
+
+/** Private Peek tallies while live + after_close + not revealed. */
+function privateTalliesPayload(
+  data: FirebaseFirestore.DocumentData,
+): Record<string, unknown> | null {
+  const status = String(data.status ?? "");
+  const visibility = String(data.resultsVisibility ?? "live");
+  const revealed = Boolean(data.resultsRevealed);
+  if (!shouldWritePrivateTallies(visibility, status, revealed)) {
+    return null;
+  }
+  const type = data.type as EngagementType;
+  if (type === "mcq") {
+    return { optionCounts: data.optionCounts ?? {} };
+  }
+  return { phrases: data.phrases ?? [] };
 }
 
 function serializeEngagementDoc(
@@ -1500,6 +1586,13 @@ function serializeEngagementDoc(
     status: data.status as EngagementStatus,
     resultsVisibility:
       (data.resultsVisibility as EngagementResultsVisibility) || "live",
+    resultsRevealed: Boolean(data.resultsRevealed),
+    revision: Number(data.revision ?? 0),
+    sortOrder: engagementSortOrder(data),
+    durationSec: (data.durationSec as number | null) ?? null,
+    autoAdvance: Boolean(data.autoAdvance),
+    liveEndsAt: (data.liveEndsAt as number | null) ?? null,
+    liveStartedAt: (data.liveStartedAt as number | null) ?? null,
     options: (data.options as { id: string; label: string }[]) ?? [],
     optionCounts: (data.optionCounts as Record<string, number>) ?? {},
     phrases: (data.phrases as { text: string; count: number }[]) ?? [],
@@ -1510,18 +1603,469 @@ function serializeEngagementDoc(
   };
 }
 
-async function closeLiveEngagements(roomId: string): Promise<void> {
+async function mirrorEngagementDoc(
+  roomId: string,
+  engagementId: string,
+  data: FirebaseFirestore.DocumentData,
+): Promise<void> {
+  await mirrorEngagementLifecycle(
+    roomId,
+    engagementId,
+    engagementMirrorPayload(data),
+    privateTalliesPayload(data),
+  );
+}
+
+async function buildAndMirrorDraftQueue(roomId: string): Promise<void> {
+  const snap = await db
+    .collection(`engagements/${roomId}/items`)
+    .where("status", "==", "draft")
+    .get();
+  if (snap.empty) {
+    await mirrorDraftQueue(roomId, null);
+    return;
+  }
+  const queue: Record<string, unknown> = {};
+  for (const docSnap of snap.docs) {
+    const data = docSnap.data();
+    queue[docSnap.id] = {
+      prompt: data.prompt,
+      type: data.type,
+      sortOrder: engagementSortOrder(data),
+      durationSec: data.durationSec ?? null,
+      autoAdvance: Boolean(data.autoAdvance),
+      resultsVisibility: data.resultsVisibility || "live",
+    };
+  }
+  await mirrorDraftQueue(roomId, queue);
+}
+
+async function enqueueExpireEngagementTask(payload: {
+  roomId: string;
+  engagementId: string;
+  expectedLiveEndsAt: number;
+  expectedGeneration: number;
+}): Promise<void> {
+  try {
+    const queue = getFunctions().taskQueue<{
+      roomId: string;
+      engagementId: string;
+      expectedLiveEndsAt: number;
+      expectedGeneration: number;
+    }>("locations/asia-southeast1/functions/expireEngagementTask");
+    await queue.enqueue(payload, {
+      scheduleTime: new Date(payload.expectedLiveEndsAt),
+      id: `expire-${payload.roomId}-${payload.engagementId}-${payload.expectedLiveEndsAt}`,
+    });
+  } catch (err) {
+    console.error("Failed to enqueue expireEngagementTask", err);
+    // Host/Present timer still works; do not fail go-live.
+  }
+}
+
+type DraftRow = {
+  id: string;
+  ref: FirebaseFirestore.DocumentReference;
+  data: FirebaseFirestore.DocumentData;
+  sortOrder: number;
+  createdAt: number;
+};
+
+async function loadDraftRowsInTx(
+  tx: FirebaseFirestore.Transaction,
+  roomId: string,
+): Promise<DraftRow[]> {
+  const snap = await tx.get(
+    db.collection(`engagements/${roomId}/items`).where("status", "==", "draft"),
+  );
+  return snap.docs.map((d) => {
+    const data = d.data();
+    return {
+      id: d.id,
+      ref: d.ref,
+      data,
+      sortOrder: engagementSortOrder(data),
+      createdAt: Number(data.createdAt ?? 0),
+    };
+  });
+}
+
+/**
+ * Shared expire / advance / complete-grace state machine.
+ * Writes Firestore + returns mirror jobs for the caller.
+ */
+async function expireOrAdvanceEngagement(
+  roomId: string,
+  opts: {
+    kind: "manual" | "expire" | "completeGrace";
+    expectedLiveEndsAt?: number | null;
+    expectedGeneration?: number;
+    fromEngagementId?: string;
+  },
+): Promise<{
+  alreadyAdvanced: boolean;
+  noopReason?: ExpireNoopReason;
+  control: EngageControlDoc;
+  mirrorJobs: { id: string; data: FirebaseFirestore.DocumentData }[];
+  enqueueExpire: {
+    engagementId: string;
+    liveEndsAt: number;
+    generation: number;
+  } | null;
+}> {
+  const controlRef = db.doc(`engageControl/${roomId}`);
+  const mirrorJobs: { id: string; data: FirebaseFirestore.DocumentData }[] = [];
+  let enqueueExpire: {
+    engagementId: string;
+    liveEndsAt: number;
+    generation: number;
+  } | null = null;
+  let alreadyAdvanced = false;
+  let noopReason: ExpireNoopReason | undefined;
+  let controlOut = defaultEngageControl();
+
+  await db.runTransaction(async (tx) => {
+    mirrorJobs.length = 0;
+    enqueueExpire = null;
+    alreadyAdvanced = false;
+    noopReason = undefined;
+    const controlSnap = await tx.get(controlRef);
+    const control: EngageControlDoc = {
+      ...defaultEngageControl(),
+      ...(controlSnap.data() as Partial<EngageControlDoc> | undefined),
+    };
+    controlOut = { ...control };
+    const now = Date.now();
+    const drafts = await loadDraftRowsInTx(tx, roomId);
+
+    const closeEngagementInTx = (
+      engId: string,
+      engRef: FirebaseFirestore.DocumentReference,
+      engData: FirebaseFirestore.DocumentData,
+    ): FirebaseFirestore.DocumentData => {
+      const closedAt = now;
+      const next = {
+        ...engData,
+        status: "closed" as const,
+        resultsRevealed: true,
+        closedAt,
+        revision: nextRevision(engData),
+        liveEndsAt: engData.liveEndsAt ?? null,
+      };
+      tx.update(engRef, {
+        status: "closed",
+        resultsRevealed: true,
+        closedAt,
+        revision: next.revision,
+      });
+      mirrorJobs.push({ id: engId, data: next });
+      return next;
+    };
+
+    const promoteDraftInTx = (
+      draft: DraftRow,
+      generation: number,
+    ): {
+      next: FirebaseFirestore.DocumentData;
+      liveEndsAt: number | null;
+    } => {
+      const liveStartedAt = now;
+      const durationSec =
+        typeof draft.data.durationSec === "number"
+          ? draft.data.durationSec
+          : null;
+      const liveEndsAt =
+        durationSec != null ? liveStartedAt + durationSec * 1000 : null;
+      const next = {
+        ...draft.data,
+        status: "live" as const,
+        resultsRevealed: false,
+        closedAt: null,
+        liveStartedAt,
+        liveEndsAt,
+        revision: nextRevision(draft.data),
+        sortOrder: draft.sortOrder,
+      };
+      tx.update(draft.ref, {
+        status: "live",
+        resultsRevealed: false,
+        closedAt: null,
+        liveStartedAt,
+        liveEndsAt,
+        revision: next.revision,
+        sortOrder: draft.sortOrder,
+      });
+      mirrorJobs.push({ id: draft.id, data: next });
+      if (liveEndsAt != null) {
+        enqueueExpire = {
+          engagementId: draft.id,
+          liveEndsAt,
+          generation,
+        };
+      }
+      return { next, liveEndsAt };
+    };
+
+    if (opts.kind === "completeGrace") {
+      if (
+        control.phase !== "grace" ||
+        (opts.expectedGeneration != null &&
+          opts.expectedGeneration !== control.generation) ||
+        control.advanceAt == null ||
+        now < control.advanceAt
+      ) {
+        alreadyAdvanced = true;
+        controlOut = control;
+        return;
+      }
+      const reservedId = control.reservedNextId;
+      const draft = drafts.find((d) => d.id === reservedId) ?? null;
+      if (!draft) {
+        const nextControl: EngageControlDoc = {
+          ...control,
+          generation: control.generation + 1,
+          phase: "idle",
+          activeEngagementId: null,
+          reservedNextId: null,
+          liveEndsAt: null,
+          advanceAt: null,
+          queueVersion: control.queueVersion + 1,
+        };
+        tx.set(controlRef, nextControl);
+        controlOut = nextControl;
+        return;
+      }
+      const generation = control.generation + 1;
+      const { liveEndsAt } = promoteDraftInTx(draft, generation);
+      const nextControl: EngageControlDoc = {
+        generation,
+        phase: "live",
+        activeEngagementId: draft.id,
+        reservedNextId: null,
+        liveEndsAt,
+        advanceAt: null,
+        queueVersion: control.queueVersion + 1,
+      };
+      tx.set(controlRef, nextControl);
+      controlOut = nextControl;
+      return;
+    }
+
+    if (opts.kind === "expire") {
+      // Resolve target without loading: prefer control.active as source of truth.
+      const fromId = opts.fromEngagementId?.trim() || "";
+      const controlActive = control.activeEngagementId?.trim() || "";
+      if (fromId && controlActive && fromId !== controlActive) {
+        alreadyAdvanced = true;
+        noopReason = "id_mismatch";
+        return;
+      }
+      const candidateId = controlActive || fromId || null;
+      if (!candidateId) {
+        alreadyAdvanced = true;
+        noopReason = "no_active";
+        return;
+      }
+
+      const engRef = db.doc(`engagements/${roomId}/items/${candidateId}`);
+      const engSnap = await tx.get(engRef);
+      const engData = engSnap.exists ? engSnap.data()! : null;
+      const liveEndsAt = engData
+        ? ((engData.liveEndsAt as number | null) ?? null)
+        : null;
+
+      const guard = evaluateExpireGuards({
+        activeEngagementId: control.activeEngagementId,
+        fromEngagementId: opts.fromEngagementId,
+        engStatus: engData ? String(engData.status ?? "") : null,
+        liveEndsAt,
+        expectedLiveEndsAt: opts.expectedLiveEndsAt,
+        now,
+        controlGeneration: control.generation,
+        expectedGeneration: opts.expectedGeneration,
+      });
+
+      if (guard.result === "noop") {
+        alreadyAdvanced = true;
+        noopReason = guard.reason;
+        controlOut = control;
+        return;
+      }
+
+      const activeId = guard.engagementId;
+      // engData is guaranteed live + timed when proceed
+      closeEngagementInTx(activeId, engRef, engData!);
+      const autoAdvance = Boolean(engData!.autoAdvance) && liveEndsAt != null;
+      const nextId = nextDraftId(drafts);
+      const generation = control.generation + 1;
+
+      if (autoAdvance && nextId) {
+        const nextControl: EngageControlDoc = {
+          generation,
+          phase: "grace",
+          activeEngagementId: activeId,
+          reservedNextId: nextId,
+          liveEndsAt: null,
+          advanceAt: now + GRACE_MS,
+          queueVersion: control.queueVersion + 1,
+        };
+        tx.set(controlRef, nextControl);
+        controlOut = nextControl;
+      } else {
+        const nextControl: EngageControlDoc = {
+          generation,
+          phase: "idle",
+          activeEngagementId: null,
+          reservedNextId: null,
+          liveEndsAt: null,
+          advanceAt: null,
+          queueVersion: control.queueVersion + 1,
+        };
+        tx.set(controlRef, nextControl);
+        controlOut = nextControl;
+      }
+      return;
+    }
+
+    // kind === "manual" — Start next / advance from held or idle
+    // Close any currently live engagement first.
+    const liveSnap = await tx.get(
+      db
+        .collection(`engagements/${roomId}/items`)
+        .where("status", "==", "live"),
+    );
+    for (const liveDoc of liveSnap.docs) {
+      closeEngagementInTx(liveDoc.id, liveDoc.ref, liveDoc.data());
+    }
+
+    // Re-load drafts after closes (live ones were not drafts).
+    const draftRows = drafts.filter(
+      (d) => !liveSnap.docs.some((l) => l.id === d.id),
+    );
+    const nextId = nextDraftId(draftRows);
+    if (!nextId) {
+      const nextControl: EngageControlDoc = {
+        generation: control.generation + 1,
+        phase: "idle",
+        activeEngagementId: null,
+        reservedNextId: null,
+        liveEndsAt: null,
+        advanceAt: null,
+        queueVersion: control.queueVersion + 1,
+      };
+      tx.set(controlRef, nextControl);
+      controlOut = nextControl;
+      return;
+    }
+    const draft = draftRows.find((d) => d.id === nextId)!;
+    const generation = control.generation + 1;
+    const { liveEndsAt } = promoteDraftInTx(draft, generation);
+    const nextControl: EngageControlDoc = {
+      generation,
+      phase: "live",
+      activeEngagementId: draft.id,
+      reservedNextId: null,
+      liveEndsAt,
+      advanceAt: null,
+      queueVersion: control.queueVersion + 1,
+    };
+    tx.set(controlRef, nextControl);
+    controlOut = nextControl;
+  });
+
+  return {
+    alreadyAdvanced,
+    noopReason,
+    control: controlOut,
+    mirrorJobs,
+    enqueueExpire,
+  };
+}
+
+function logExpireNoop(params: {
+  roomId: string;
+  engagementId?: string | null;
+  reason: ExpireNoopReason;
+  uid?: string;
+  liveEndsAt?: number | null;
+  expectedLiveEndsAt?: number | null;
+}): void {
+  const level =
+    params.reason === "untimed" || params.reason === "token_mismatch"
+      ? "warn"
+      : "info";
+  const payload: Record<string, unknown> = {
+    event: "engage_expire_noop",
+    roomId: params.roomId,
+    engagementId: params.engagementId ?? null,
+    reason: params.reason,
+    kind: "expire",
+  };
+  if (params.uid) payload.uid = params.uid;
+  if (params.liveEndsAt != null && Number.isFinite(params.liveEndsAt)) {
+    payload.liveEndsAt = params.liveEndsAt;
+  }
+  if (
+    params.expectedLiveEndsAt != null &&
+    Number.isFinite(params.expectedLiveEndsAt)
+  ) {
+    payload.expectedLiveEndsAt = params.expectedLiveEndsAt;
+  }
+  console[level](JSON.stringify(payload));
+}
+
+async function applyAdvanceMirrors(
+  roomId: string,
+  result: Awaited<ReturnType<typeof expireOrAdvanceEngagement>>,
+): Promise<void> {
+  await Promise.all(
+    result.mirrorJobs.map((job) =>
+      mirrorEngagementDoc(roomId, job.id, job.data),
+    ),
+  );
+  await mirrorEngageControl(roomId, result.control);
+  await buildAndMirrorDraftQueue(roomId);
+  if (result.enqueueExpire) {
+    await enqueueExpireEngagementTask({
+      roomId,
+      engagementId: result.enqueueExpire.engagementId,
+      expectedLiveEndsAt: result.enqueueExpire.liveEndsAt,
+      expectedGeneration: result.enqueueExpire.generation,
+    });
+  }
+}
+
+/** Close other live engagements with reveal; used by go-live / create startLive. */
+async function closeLiveEngagements(
+  roomId: string,
+  exceptId?: string,
+): Promise<void> {
   const live = await db
     .collection(`engagements/${roomId}/items`)
     .where("status", "==", "live")
     .get();
   const closedAt = Date.now();
   await Promise.all(
-    live.docs.map(async (docSnap) => {
-      await docSnap.ref.update({ status: "closed", closedAt });
-      const next = { ...docSnap.data(), status: "closed", closedAt };
-      await mirrorEngagement(roomId, docSnap.id, engagementMirrorPayload(next));
-    }),
+    live.docs
+      .filter((docSnap) => docSnap.id !== exceptId)
+      .map(async (docSnap) => {
+        const data = docSnap.data();
+        const revision = nextRevision(data);
+        await docSnap.ref.update({
+          status: "closed",
+          closedAt,
+          resultsRevealed: true,
+          revision,
+        });
+        const next = {
+          ...data,
+          status: "closed",
+          closedAt,
+          resultsRevealed: true,
+          revision,
+        };
+        await mirrorEngagementDoc(roomId, docSnap.id, next);
+      }),
   );
 }
 
@@ -1534,17 +2078,24 @@ export const createEngagement = onCall(async (request) => {
 
   const ctx = await loadAccessContext(roomId, uid, email);
   if (!ctx.isOrganizer) {
-    throw new HttpsError("permission-denied", "Only the organizer can create engagements");
+    throw new HttpsError(
+      "permission-denied",
+      "Only the organizer can create engagements",
+    );
   }
 
   let type: EngagementType;
   let prompt: string;
   let options: { id: string; label: string }[] = [];
   let resultsVisibility: EngagementResultsVisibility;
+  let durationSec: number | null;
+  let autoAdvance: boolean;
   try {
     type = assertEngagementType(request.data?.type);
     prompt = assertEngagementPrompt(request.data?.prompt);
     resultsVisibility = assertResultsVisibility(request.data?.resultsVisibility);
+    durationSec = assertDurationSec(request.data?.durationSec);
+    autoAdvance = assertAutoAdvance(request.data?.autoAdvance, durationSec);
     if (type === "mcq") {
       options = assertMcqOptions(request.data?.options);
     }
@@ -1556,6 +2107,21 @@ export const createEngagement = onCall(async (request) => {
   }
 
   const startLive = Boolean(request.data?.startLive);
+  if (!startLive) {
+    const draftCount = (
+      await db
+        .collection(`engagements/${roomId}/items`)
+        .where("status", "==", "draft")
+        .get()
+    ).size;
+    if (draftCount >= MAX_ENGAGEMENT_DRAFTS) {
+      throw new HttpsError(
+        "resource-exhausted",
+        `At most ${MAX_ENGAGEMENT_DRAFTS} drafts per room`,
+      );
+    }
+  }
+
   if (startLive) {
     await closeLiveEngagements(roomId);
   }
@@ -1566,6 +2132,11 @@ export const createEngagement = onCall(async (request) => {
   for (const opt of options) optionCounts[opt.id] = 0;
 
   const status: EngagementStatus = startLive ? "live" : "draft";
+  const liveStartedAt = startLive ? createdAt : null;
+  const liveEndsAt =
+    startLive && durationSec != null
+      ? createdAt + durationSec * 1000
+      : null;
   const doc = {
     type,
     prompt,
@@ -1577,14 +2148,65 @@ export const createEngagement = onCall(async (request) => {
     responseCount: 0,
     status,
     resultsVisibility,
+    resultsRevealed: false,
+    revision: startLive ? 1 : 0,
+    sortOrder: createdAt,
+    durationSec,
+    autoAdvance,
+    liveStartedAt,
+    liveEndsAt,
     createdBy: uid,
     createdAt,
     closedAt: null as number | null,
   };
   await ref.set(doc);
+
+  const controlRef = db.doc(`engageControl/${roomId}`);
   if (status === "live") {
-    await mirrorEngagement(roomId, ref.id, engagementMirrorPayload(doc));
+    await mirrorEngagementDoc(roomId, ref.id, doc);
+    const controlSnap = await controlRef.get();
+    const prev = {
+      ...defaultEngageControl(),
+      ...(controlSnap.data() as Partial<EngageControlDoc> | undefined),
+    };
+    const generation = prev.generation + 1;
+    await controlRef.set({
+      generation,
+      phase: "live" satisfies EngagePhase,
+      activeEngagementId: ref.id,
+      reservedNextId: null,
+      liveEndsAt,
+      advanceAt: null,
+      queueVersion: prev.queueVersion + 1,
+    });
+    await mirrorEngageControl(roomId, {
+      phase: "live",
+      advanceAt: null,
+      generation,
+      activeEngagementId: ref.id,
+      reservedNextId: null,
+    });
+    if (liveEndsAt != null) {
+      await enqueueExpireEngagementTask({
+        roomId,
+        engagementId: ref.id,
+        expectedLiveEndsAt: liveEndsAt,
+        expectedGeneration: generation,
+      });
+    }
+  } else {
+    const controlSnap = await controlRef.get();
+    const prev = {
+      ...defaultEngageControl(),
+      ...(controlSnap.data() as Partial<EngageControlDoc> | undefined),
+    };
+    await controlRef.set(
+      { queueVersion: prev.queueVersion + 1 },
+      { merge: true },
+    );
+    await mirrorEngageControl(roomId, prev);
   }
+  await buildAndMirrorDraftQueue(roomId);
   return { engagementId: ref.id, status };
 });
 
@@ -1593,13 +2215,19 @@ export const updateEngagement = onCall(async (request) => {
   const roomId = String(request.data?.roomId ?? "").trim();
   const engagementId = String(request.data?.engagementId ?? "").trim();
   if (!roomId || !engagementId) {
-    throw new HttpsError("invalid-argument", "roomId and engagementId required");
+    throw new HttpsError(
+      "invalid-argument",
+      "roomId and engagementId required",
+    );
   }
   await rateLimit(uid, "updateEngagement");
 
   const ctx = await loadAccessContext(roomId, uid, email);
   if (!ctx.isOrganizer) {
-    throw new HttpsError("permission-denied", "Only the organizer can update engagements");
+    throw new HttpsError(
+      "permission-denied",
+      "Only the organizer can update engagements",
+    );
   }
 
   const ref = db.doc(`engagements/${roomId}/items/${engagementId}`);
@@ -1627,6 +2255,23 @@ export const updateEngagement = onCall(async (request) => {
       patch.options = options;
       patch.optionCounts = optionCounts;
     }
+    if (
+      request.data?.durationSec !== undefined ||
+      request.data?.autoAdvance !== undefined
+    ) {
+      const durationSec =
+        request.data?.durationSec !== undefined
+          ? assertDurationSec(request.data.durationSec)
+          : ((data.durationSec as number | null) ?? null);
+      const autoAdvance = assertAutoAdvance(
+        request.data?.autoAdvance !== undefined
+          ? request.data.autoAdvance
+          : data.autoAdvance,
+        durationSec,
+      );
+      patch.durationSec = durationSec;
+      patch.autoAdvance = autoAdvance;
+    }
   } catch (err) {
     throw new HttpsError(
       "invalid-argument",
@@ -1638,6 +2283,7 @@ export const updateEngagement = onCall(async (request) => {
     return { ok: true as const };
   }
   await ref.update(patch);
+  await buildAndMirrorDraftQueue(roomId);
   return { ok: true as const };
 });
 
@@ -1646,7 +2292,10 @@ export const goLiveEngagement = onCall(async (request) => {
   const roomId = String(request.data?.roomId ?? "").trim();
   const engagementId = String(request.data?.engagementId ?? "").trim();
   if (!roomId || !engagementId) {
-    throw new HttpsError("invalid-argument", "roomId and engagementId required");
+    throw new HttpsError(
+      "invalid-argument",
+      "roomId and engagementId required",
+    );
   }
   await rateLimit(uid, "goLiveEngagement");
 
@@ -1660,16 +2309,78 @@ export const goLiveEngagement = onCall(async (request) => {
   if (!snap.exists) throw new HttpsError("not-found", "Engagement not found");
   const data = snap.data()!;
   if (data.status === "live") {
+    await mirrorEngagementDoc(roomId, engagementId, data);
     return { ok: true as const, alreadyLive: true };
   }
   if (data.status === "closed") {
-    throw new HttpsError("failed-precondition", "Closed engagements cannot go live");
+    throw new HttpsError(
+      "failed-precondition",
+      "Closed engagements cannot go live",
+    );
   }
 
-  await closeLiveEngagements(roomId);
-  await ref.update({ status: "live", closedAt: null });
-  const next = { ...data, status: "live", closedAt: null };
-  await mirrorEngagement(roomId, engagementId, engagementMirrorPayload(next));
+  await closeLiveEngagements(roomId, engagementId);
+  const now = Date.now();
+  const durationSec =
+    typeof data.durationSec === "number" ? data.durationSec : null;
+  const liveStartedAt = now;
+  const liveEndsAt =
+    durationSec != null ? now + durationSec * 1000 : null;
+  const revision = nextRevision(data);
+  const sortOrder = engagementSortOrder(data);
+  await ref.update({
+    status: "live",
+    closedAt: null,
+    resultsRevealed: false,
+    liveStartedAt,
+    liveEndsAt,
+    revision,
+    sortOrder,
+  });
+  const next = {
+    ...data,
+    status: "live",
+    closedAt: null,
+    resultsRevealed: false,
+    liveStartedAt,
+    liveEndsAt,
+    revision,
+    sortOrder,
+  };
+  await mirrorEngagementDoc(roomId, engagementId, next);
+
+  const controlRef = db.doc(`engageControl/${roomId}`);
+  const controlSnap = await controlRef.get();
+  const prev = {
+    ...defaultEngageControl(),
+    ...(controlSnap.data() as Partial<EngageControlDoc> | undefined),
+  };
+  const generation = prev.generation + 1;
+  await controlRef.set({
+    generation,
+    phase: "live" satisfies EngagePhase,
+    activeEngagementId: engagementId,
+    reservedNextId: null,
+    liveEndsAt,
+    advanceAt: null,
+    queueVersion: prev.queueVersion + 1,
+  });
+  await mirrorEngageControl(roomId, {
+    phase: "live",
+    advanceAt: null,
+    generation,
+    activeEngagementId: engagementId,
+    reservedNextId: null,
+  });
+  if (liveEndsAt != null) {
+    await enqueueExpireEngagementTask({
+      roomId,
+      engagementId,
+      expectedLiveEndsAt: liveEndsAt,
+      expectedGeneration: generation,
+    });
+  }
+  await buildAndMirrorDraftQueue(roomId);
   return { ok: true as const };
 });
 
@@ -1678,33 +2389,137 @@ export const closeEngagement = onCall(async (request) => {
   const roomId = String(request.data?.roomId ?? "").trim();
   const engagementId = String(request.data?.engagementId ?? "").trim();
   if (!roomId || !engagementId) {
-    throw new HttpsError("invalid-argument", "roomId and engagementId required");
+    throw new HttpsError(
+      "invalid-argument",
+      "roomId and engagementId required",
+    );
   }
   await rateLimit(uid, "closeEngagement");
 
   const ctx = await loadAccessContext(roomId, uid, email);
   if (!ctx.isOrganizer) {
-    throw new HttpsError("permission-denied", "Only the organizer can close engagements");
+    throw new HttpsError(
+      "permission-denied",
+      "Only the organizer can close engagements",
+    );
   }
 
   const ref = db.doc(`engagements/${roomId}/items/${engagementId}`);
   const snap = await ref.get();
   if (!snap.exists) throw new HttpsError("not-found", "Engagement not found");
   const data = snap.data()!;
-  if (data.status === "closed") {
-    return { ok: true as const, alreadyClosed: true };
-  }
   if (data.status === "draft") {
-    throw new HttpsError("failed-precondition", "Drafts cannot be closed; delete instead");
+    throw new HttpsError(
+      "failed-precondition",
+      "Drafts cannot be closed; delete instead",
+    );
   }
-  const closedAt = Date.now();
-  await ref.update({ status: "closed", closedAt });
-  await mirrorEngagement(
+
+  const closedAt =
+    data.status === "closed" && data.closedAt
+      ? Number(data.closedAt)
+      : Date.now();
+  const revision =
+    data.status === "closed" && data.resultsRevealed
+      ? Number(data.revision ?? 0)
+      : nextRevision(data);
+  const next = {
+    ...data,
+    status: "closed" as const,
+    resultsRevealed: true,
+    closedAt,
+    revision,
+  };
+  if (data.status !== "closed" || !data.resultsRevealed) {
+    await ref.update({
+      status: "closed",
+      resultsRevealed: true,
+      closedAt,
+      revision,
+    });
+  }
+  // Re-mirror even if already closed (repair); clears private node.
+  await mirrorEngagementLifecycle(
     roomId,
     engagementId,
-    engagementMirrorPayload({ ...data, status: "closed", closedAt }),
+    engagementMirrorPayload(next),
+    null,
   );
-  return { ok: true as const };
+
+  const controlRef = db.doc(`engageControl/${roomId}`);
+  const controlSnap = await controlRef.get();
+  const prev = {
+    ...defaultEngageControl(),
+    ...(controlSnap.data() as Partial<EngageControlDoc> | undefined),
+  };
+  await controlRef.set({
+    ...prev,
+    phase: "idle" satisfies EngagePhase,
+    activeEngagementId: null,
+    reservedNextId: null,
+    liveEndsAt: null,
+    advanceAt: null,
+  });
+  await mirrorEngageControl(roomId, {
+    phase: "idle",
+    advanceAt: null,
+    generation: prev.generation,
+    activeEngagementId: null,
+    reservedNextId: null,
+  });
+
+  return {
+    ok: true as const,
+    alreadyClosed: data.status === "closed",
+  };
+});
+
+export const revealEngagementResults = onCall(async (request) => {
+  const { uid, email } = requireAuth(request);
+  const roomId = String(request.data?.roomId ?? "").trim();
+  const engagementId = String(request.data?.engagementId ?? "").trim();
+  if (!roomId || !engagementId) {
+    throw new HttpsError(
+      "invalid-argument",
+      "roomId and engagementId required",
+    );
+  }
+  await rateLimit(uid, "revealEngagement");
+
+  const ctx = await loadAccessContext(roomId, uid, email);
+  if (!ctx.isOrganizer) {
+    throw new HttpsError(
+      "permission-denied",
+      "Only the organizer can reveal results",
+    );
+  }
+
+  const ref = db.doc(`engagements/${roomId}/items/${engagementId}`);
+  const snap = await ref.get();
+  if (!snap.exists) throw new HttpsError("not-found", "Engagement not found");
+  const data = snap.data()!;
+  if (data.status !== "live") {
+    throw new HttpsError(
+      "failed-precondition",
+      "Only live engagements can reveal results",
+    );
+  }
+
+  const alreadyRevealed = Boolean(data.resultsRevealed);
+  const revision = alreadyRevealed
+    ? Number(data.revision ?? 0)
+    : nextRevision(data);
+  if (!alreadyRevealed) {
+    await ref.update({ resultsRevealed: true, revision });
+  }
+  const next = { ...data, resultsRevealed: true, revision };
+  await mirrorEngagementLifecycle(
+    roomId,
+    engagementId,
+    engagementMirrorPayload(next),
+    null,
+  );
+  return { ok: true as const, alreadyRevealed };
 });
 
 export const deleteEngagement = onCall(async (request) => {
@@ -1712,13 +2527,19 @@ export const deleteEngagement = onCall(async (request) => {
   const roomId = String(request.data?.roomId ?? "").trim();
   const engagementId = String(request.data?.engagementId ?? "").trim();
   if (!roomId || !engagementId) {
-    throw new HttpsError("invalid-argument", "roomId and engagementId required");
+    throw new HttpsError(
+      "invalid-argument",
+      "roomId and engagementId required",
+    );
   }
   await rateLimit(uid, "deleteEngagement");
 
   const ctx = await loadAccessContext(roomId, uid, email);
   if (!ctx.isOrganizer) {
-    throw new HttpsError("permission-denied", "Only the organizer can delete engagements");
+    throw new HttpsError(
+      "permission-denied",
+      "Only the organizer can delete engagements",
+    );
   }
 
   const ref = db.doc(`engagements/${roomId}/items/${engagementId}`);
@@ -1738,6 +2559,19 @@ export const deleteEngagement = onCall(async (request) => {
       clearUserEngagementResponse(d.id, roomId, engagementId),
     ),
   );
+
+  const controlRef = db.doc(`engageControl/${roomId}`);
+  const controlSnap = await controlRef.get();
+  const prev = {
+    ...defaultEngageControl(),
+    ...(controlSnap.data() as Partial<EngageControlDoc> | undefined),
+  };
+  await controlRef.set(
+    { queueVersion: prev.queueVersion + 1 },
+    { merge: true },
+  );
+  await mirrorEngageControl(roomId, prev);
+  await buildAndMirrorDraftQueue(roomId);
   return { ok: true as const };
 });
 
@@ -1749,7 +2583,10 @@ export const listEngagements = onCall(async (request) => {
 
   const ctx = await loadAccessContext(roomId, uid, email);
   if (!ctx.isOrganizer) {
-    throw new HttpsError("permission-denied", "Only the organizer can list all engagements");
+    throw new HttpsError(
+      "permission-denied",
+      "Only the organizer can list all engagements",
+    );
   }
 
   const snap = await db.collection(`engagements/${roomId}/items`).get();
@@ -1760,6 +2597,16 @@ export const listEngagements = onCall(async (request) => {
         s === "live" ? 0 : s === "draft" ? 1 : 2;
       const r = rank(a.status) - rank(b.status);
       if (r !== 0) return r;
+      if (a.status === "draft" && b.status === "draft") {
+        return (
+          a.sortOrder - b.sortOrder ||
+          a.createdAt - b.createdAt ||
+          a.id.localeCompare(b.id)
+        );
+      }
+      if (a.status === "closed" && b.status === "closed") {
+        return (b.closedAt ?? 0) - (a.closedAt ?? 0);
+      }
       return b.createdAt - a.createdAt;
     });
   return { engagements };
@@ -1773,13 +2620,18 @@ export const exportEngagements = onCall(async (request) => {
 
   const ctx = await loadAccessContext(roomId, uid, email);
   if (!ctx.isOrganizer) {
-    throw new HttpsError("permission-denied", "Only the organizer can export engagements");
+    throw new HttpsError(
+      "permission-denied",
+      "Only the organizer can export engagements",
+    );
   }
 
   const engagementIdFilter = String(request.data?.engagementId ?? "").trim();
   let engDocs: FirebaseFirestore.QueryDocumentSnapshot[];
   if (engagementIdFilter) {
-    const one = await db.doc(`engagements/${roomId}/items/${engagementIdFilter}`).get();
+    const one = await db
+      .doc(`engagements/${roomId}/items/${engagementIdFilter}`)
+      .get();
     if (!one.exists) throw new HttpsError("not-found", "Engagement not found");
     engDocs = [one as FirebaseFirestore.QueryDocumentSnapshot];
   } else {
@@ -1820,7 +2672,10 @@ export const respondToEngagement = onCall(async (request) => {
   const roomId = String(request.data?.roomId ?? "").trim();
   const engagementId = String(request.data?.engagementId ?? "").trim();
   if (!roomId || !engagementId) {
-    throw new HttpsError("invalid-argument", "roomId and engagementId required");
+    throw new HttpsError(
+      "invalid-argument",
+      "roomId and engagementId required",
+    );
   }
   await rateLimit(uid, "respondEngagement");
 
@@ -1839,11 +2694,39 @@ export const respondToEngagement = onCall(async (request) => {
   }
 
   const engRef = db.doc(`engagements/${roomId}/items/${engagementId}`);
+
+  // Lazy overdue close before taking a response.
+  const preSnap = await engRef.get();
+  if (preSnap.exists) {
+    const pre = preSnap.data()!;
+    const liveEndsAt = pre.liveEndsAt as number | null;
+    if (
+      pre.status === "live" &&
+      liveEndsAt != null &&
+      Date.now() >= liveEndsAt
+    ) {
+      const result = await expireOrAdvanceEngagement(roomId, {
+        kind: "expire",
+        expectedLiveEndsAt: liveEndsAt,
+        fromEngagementId: engagementId,
+      });
+      await applyAdvanceMirrors(roomId, result);
+      throw new HttpsError(
+        "failed-precondition",
+        "This engagement has ended",
+      );
+    }
+  }
+
   const responseRef = db.doc(
     `engagementResponses/${roomId}/items/${engagementId}/users/${uid}`,
   );
 
-  let mirrorResponse: { optionId?: string; text?: string } = {};
+  const mirrorState: {
+    eng: FirebaseFirestore.DocumentData | null;
+    response: { optionId?: string; text?: string };
+    responseCount: number;
+  } = { eng: null, response: {}, responseCount: 0 };
 
   await db.runTransaction(async (tx) => {
     const engSnap = await tx.get(engRef);
@@ -1852,7 +2735,17 @@ export const respondToEngagement = onCall(async (request) => {
     }
     const eng = engSnap.data()!;
     if (eng.status !== "live") {
-      throw new HttpsError("failed-precondition", "This engagement is not live");
+      throw new HttpsError(
+        "failed-precondition",
+        "This engagement is not live",
+      );
+    }
+    const liveEndsAt = eng.liveEndsAt as number | null;
+    if (liveEndsAt != null && Date.now() >= liveEndsAt) {
+      throw new HttpsError(
+        "failed-precondition",
+        "This engagement has ended",
+      );
     }
 
     const type = eng.type as EngagementType;
@@ -1871,6 +2764,7 @@ export const respondToEngagement = onCall(async (request) => {
       ...((eng.phraseDisplay as Record<string, string>) ?? {}),
     };
     let responseCount = Number(eng.responseCount ?? 0);
+    let phrases = (eng.phrases as { text: string; count: number }[]) ?? [];
 
     if (type === "mcq") {
       const optionId = String(request.data?.optionId ?? "").trim();
@@ -1887,8 +2781,9 @@ export const respondToEngagement = onCall(async (request) => {
         createdAt: now,
         updatedAt: now,
       });
-      mirrorResponse = { optionId };
+      mirrorState.response = { optionId };
       tx.update(engRef, { optionCounts, responseCount });
+      mirrorState.eng = { ...eng, optionCounts, responseCount };
     } else {
       let parsed: { text: string; phrase: string };
       try {
@@ -1904,6 +2799,7 @@ export const respondToEngagement = onCall(async (request) => {
       if (!phraseDisplay[parsed.phrase]) {
         phraseDisplay[parsed.phrase] = parsed.text;
       }
+      phrases = topPhrasesFromMap(phraseCounts, phraseDisplay);
       const now = Date.now();
       tx.set(responseRef, {
         uid,
@@ -1912,28 +2808,329 @@ export const respondToEngagement = onCall(async (request) => {
         createdAt: now,
         updatedAt: now,
       });
-      mirrorResponse = { text: parsed.text };
-      const phrases = topPhrasesFromMap(phraseCounts, phraseDisplay);
+      mirrorState.response = { text: parsed.text };
       tx.update(engRef, {
         phraseCounts,
         phraseDisplay,
         phrases,
         responseCount,
       });
+      mirrorState.eng = {
+        ...eng,
+        phraseCounts,
+        phraseDisplay,
+        phrases,
+        responseCount,
+      };
     }
+    mirrorState.responseCount = responseCount;
   });
 
-  const fresh = await engRef.get();
-  if (fresh.exists) {
-    await mirrorEngagement(
-      roomId,
-      engagementId,
-      engagementMirrorPayload(fresh.data()!),
-    );
+  if (mirrorState.eng) {
+    const mirroredEng = mirrorState.eng;
+    const visibility = String(mirroredEng.resultsVisibility ?? "live");
+    const status = String(mirroredEng.status ?? "live");
+    const revealed = Boolean(mirroredEng.resultsRevealed);
+    const type = mirroredEng.type as EngagementType;
+    const tallies: Record<string, unknown> =
+      type === "mcq"
+        ? { optionCounts: mirroredEng.optionCounts ?? {} }
+        : { phrases: mirroredEng.phrases ?? [] };
+    const publicTallies = shouldPublicTallies(visibility, status, revealed)
+      ? tallies
+      : null;
+    const privateTallies = shouldWritePrivateTallies(
+      visibility,
+      status,
+      revealed,
+    )
+      ? tallies
+      : null;
+    await mirrorEngagementResponseUpdate(roomId, engagementId, uid, {
+      responseCount: mirrorState.responseCount,
+      publicTallies,
+      privateTallies,
+      userResponse: mirrorState.response,
+    });
   }
-  await mirrorUserEngagementResponse(uid, roomId, engagementId, mirrorResponse);
   return { ok: true as const };
 });
+
+export const swapEngagementOrder = onCall(async (request) => {
+  const { uid, email } = requireAuth(request);
+  const roomId = String(request.data?.roomId ?? "").trim();
+  const aId = String(request.data?.aId ?? "").trim();
+  const bId = String(request.data?.bId ?? "").trim();
+  const aOrder = Number(request.data?.aOrder);
+  const bOrder = Number(request.data?.bOrder);
+  if (!roomId || !aId || !bId) {
+    throw new HttpsError(
+      "invalid-argument",
+      "roomId, aId, and bId required",
+    );
+  }
+  if (!Number.isFinite(aOrder) || !Number.isFinite(bOrder)) {
+    throw new HttpsError("invalid-argument", "aOrder and bOrder required");
+  }
+  await rateLimit(uid, "swapEngagementOrder");
+
+  const ctx = await loadAccessContext(roomId, uid, email);
+  if (!ctx.isOrganizer) {
+    throw new HttpsError(
+      "permission-denied",
+      "Only the organizer can reorder engagements",
+    );
+  }
+
+  const aRef = db.doc(`engagements/${roomId}/items/${aId}`);
+  const bRef = db.doc(`engagements/${roomId}/items/${bId}`);
+
+  await db.runTransaction(async (tx) => {
+    const [aSnap, bSnap] = await Promise.all([tx.get(aRef), tx.get(bRef)]);
+    if (!aSnap.exists || !bSnap.exists) {
+      throw new HttpsError("not-found", "Engagement not found");
+    }
+    const aData = aSnap.data()!;
+    const bData = bSnap.data()!;
+    if (aData.status !== "draft" || bData.status !== "draft") {
+      throw new HttpsError(
+        "failed-precondition",
+        "Only drafts can be reordered",
+      );
+    }
+    const curA = engagementSortOrder(aData);
+    const curB = engagementSortOrder(bData);
+    if (curA !== aOrder || curB !== bOrder) {
+      throw new HttpsError(
+        "aborted",
+        "Order changed; reload and try again",
+      );
+    }
+    tx.update(aRef, { sortOrder: bOrder });
+    tx.update(bRef, { sortOrder: aOrder });
+  });
+
+  const controlRef = db.doc(`engageControl/${roomId}`);
+  const controlSnap = await controlRef.get();
+  const prev = {
+    ...defaultEngageControl(),
+    ...(controlSnap.data() as Partial<EngageControlDoc> | undefined),
+  };
+  await controlRef.set(
+    { queueVersion: prev.queueVersion + 1 },
+    { merge: true },
+  );
+  await mirrorEngageControl(roomId, prev);
+  await buildAndMirrorDraftQueue(roomId);
+  return { ok: true as const };
+});
+
+export const advanceEngagement = onCall(async (request) => {
+  const { uid, email } = requireAuth(request);
+  const roomId = String(request.data?.roomId ?? "").trim();
+  if (!roomId) throw new HttpsError("invalid-argument", "roomId required");
+  await rateLimit(uid, "advanceEngagement");
+
+  const expectedLiveEndsAt =
+    request.data?.expectedLiveEndsAt != null
+      ? Number(request.data.expectedLiveEndsAt)
+      : null;
+  const expectedGeneration =
+    request.data?.expectedGeneration != null
+      ? Number(request.data.expectedGeneration)
+      : undefined;
+  const fromEngagementId = String(request.data?.fromEngagementId ?? "").trim();
+  const completeGrace = Boolean(request.data?.completeGrace);
+
+  const ctx = await loadAccessContext(roomId, uid, email);
+  const isExpirePath = expectedLiveEndsAt != null && !completeGrace;
+  const isGraceComplete = completeGrace;
+
+  if (isExpirePath || isGraceComplete) {
+    const decision = canAccessRoom({
+      accessMode: ctx.accessMode,
+      isOrganizer: ctx.isOrganizer,
+      onAllowlist: ctx.onAllowlist,
+      isMember: ctx.isMember,
+    });
+    if (!decision.allowed && !ctx.isOrganizer) {
+      throw new HttpsError("permission-denied", "No access to this room");
+    }
+  } else if (!ctx.isOrganizer) {
+    throw new HttpsError(
+      "permission-denied",
+      "Only the organizer can advance engagements",
+    );
+  }
+
+  let kind: "manual" | "expire" | "completeGrace" = "manual";
+  if (isGraceComplete) kind = "completeGrace";
+  else if (isExpirePath) kind = "expire";
+
+  // If grace window elapsed and host calls without completeGrace flag, promote.
+  if (kind === "manual" && ctx.isOrganizer) {
+    const controlSnap = await db.doc(`engageControl/${roomId}`).get();
+    const control = {
+      ...defaultEngageControl(),
+      ...(controlSnap.data() as Partial<EngageControlDoc> | undefined),
+    };
+    if (
+      control.phase === "grace" &&
+      control.advanceAt != null &&
+      Date.now() >= control.advanceAt
+    ) {
+      kind = "completeGrace";
+    }
+  }
+
+  const result = await expireOrAdvanceEngagement(roomId, {
+    kind,
+    expectedLiveEndsAt,
+    expectedGeneration,
+    fromEngagementId: fromEngagementId || undefined,
+  });
+  if (result.alreadyAdvanced && result.noopReason && kind === "expire") {
+    logExpireNoop({
+      roomId,
+      engagementId: fromEngagementId || result.control.activeEngagementId,
+      reason: result.noopReason,
+      uid,
+      expectedLiveEndsAt,
+      liveEndsAt: result.control.liveEndsAt,
+    });
+  }
+  await applyAdvanceMirrors(roomId, result);
+  return {
+    ok: true as const,
+    alreadyAdvanced: result.alreadyAdvanced,
+    phase: result.control.phase,
+    activeEngagementId: result.control.activeEngagementId,
+    generation: result.control.generation,
+    advanceAt: result.control.advanceAt,
+    reservedNextId: result.control.reservedNextId,
+  };
+});
+
+export const cancelNextEngagement = onCall(async (request) => {
+  const { uid, email } = requireAuth(request);
+  const roomId = String(request.data?.roomId ?? "").trim();
+  if (!roomId) throw new HttpsError("invalid-argument", "roomId required");
+  await rateLimit(uid, "cancelNextEngagement");
+
+  const ctx = await loadAccessContext(roomId, uid, email);
+  if (!ctx.isOrganizer) {
+    throw new HttpsError(
+      "permission-denied",
+      "Only the organizer can cancel next",
+    );
+  }
+
+  const controlRef = db.doc(`engageControl/${roomId}`);
+  let phaseOut: EngagePhase = "idle";
+  let controlOut: EngageControlDoc = defaultEngageControl();
+  await db.runTransaction(async (tx) => {
+    const snap = await tx.get(controlRef);
+    const control: EngageControlDoc = {
+      ...defaultEngageControl(),
+      ...(snap.data() as Partial<EngageControlDoc> | undefined),
+    };
+    if (control.phase !== "grace") {
+      phaseOut = control.phase;
+      controlOut = control;
+      return;
+    }
+    const next: EngageControlDoc = {
+      ...control,
+      phase: "held",
+      advanceAt: null,
+    };
+    tx.set(controlRef, next);
+    phaseOut = "held";
+    controlOut = next;
+  });
+  await mirrorEngageControl(roomId, controlOut);
+  return { ok: true as const, phase: phaseOut };
+});
+
+/** Cloud Tasks backstop for timed engagements. */
+export const expireEngagementTask = onTaskDispatched(
+  {
+    retryConfig: { maxAttempts: 3, minBackoffSeconds: 10 },
+    rateLimits: { maxConcurrentDispatches: 10 },
+  },
+  async (request) => {
+    const roomId = String(request.data?.roomId ?? "").trim();
+    if (!roomId) {
+      console.warn("expireEngagementTask missing roomId", request.data);
+      return;
+    }
+
+    const expectedGeneration = Number(request.data?.expectedGeneration);
+    const generationOpt = Number.isFinite(expectedGeneration)
+      ? expectedGeneration
+      : undefined;
+
+    if (request.data?.completeGrace) {
+      const graceResult = await expireOrAdvanceEngagement(roomId, {
+        kind: "completeGrace",
+        expectedGeneration: generationOpt,
+      });
+      await applyAdvanceMirrors(roomId, graceResult);
+      return;
+    }
+
+    const engagementId = String(request.data?.engagementId ?? "").trim();
+    const expectedLiveEndsAt = Number(request.data?.expectedLiveEndsAt);
+    if (!engagementId || !Number.isFinite(expectedLiveEndsAt)) {
+      console.warn("expireEngagementTask missing fields", request.data);
+      return;
+    }
+    const result = await expireOrAdvanceEngagement(roomId, {
+      kind: "expire",
+      expectedLiveEndsAt,
+      expectedGeneration: generationOpt,
+      fromEngagementId: engagementId,
+    });
+    if (result.alreadyAdvanced && result.noopReason) {
+      logExpireNoop({
+        roomId,
+        engagementId,
+        reason: result.noopReason,
+        expectedLiveEndsAt,
+        liveEndsAt: result.control.liveEndsAt,
+      });
+    }
+    await applyAdvanceMirrors(roomId, result);
+
+    // If entered grace, enqueue a follow-up to complete auto-advance.
+    if (
+      result.control.phase === "grace" &&
+      result.control.advanceAt != null
+    ) {
+      try {
+        const queue = getFunctions().taskQueue<{
+          roomId: string;
+          expectedGeneration: number;
+          completeGrace: boolean;
+        }>("locations/asia-southeast1/functions/expireEngagementTask");
+        await queue.enqueue(
+          {
+            roomId,
+            expectedGeneration: result.control.generation,
+            completeGrace: true,
+          },
+          {
+            scheduleTime: new Date(result.control.advanceAt),
+            id: `grace-${roomId}-${result.control.generation}-${result.control.advanceAt}`,
+          },
+        );
+      } catch (err) {
+        console.error("Failed to enqueue grace completion task", err);
+      }
+    }
+  },
+);
+
 
 /** Organizer permanently deletes a room and related Firestore/RTDB data. */
 export const deleteRoom = onCall(async (request) => {
@@ -1987,6 +3184,12 @@ export const deleteRoom = onCall(async (request) => {
     );
   }
   await deleteQueryInBatches(db.collection(`engagements/${roomId}/items`));
+
+  try {
+    await db.doc(`engageControl/${roomId}`).delete();
+  } catch {
+    // may not exist
+  }
 
   await releaseJoinCode(room.joinCode as string | null | undefined);
   await roomRef.delete();

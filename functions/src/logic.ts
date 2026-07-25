@@ -73,24 +73,33 @@ export const RATE_LIMIT_MS = {
   updateEngagement: 1000,
   goLiveEngagement: 1000,
   closeEngagement: 500,
+  revealEngagement: 500,
   deleteEngagement: 800,
   respondEngagement: 400,
   listEngagements: 0,
   exportEngagements: 2000,
+  swapEngagementOrder: 500,
+  advanceEngagement: 2000,
+  cancelNextEngagement: 500,
   listRoomMembers: 0,
   removeRoomMember: 800,
 };
 
-export type EngagementType = "mcq" | "open";
+export type EngagementType = "mcq" | "word_cloud" | "open_text";
 export type EngagementStatus = "draft" | "live" | "closed";
 export type EngagementResultsVisibility = "live" | "after_close";
+export type EngagePhase = "idle" | "live" | "grace" | "held";
 
 export const MAX_ENGAGEMENT_PROMPT = 200;
 export const MAX_ENGAGEMENT_OPTIONS = 6;
 export const MIN_ENGAGEMENT_OPTIONS = 2;
 export const MAX_OPTION_LABEL = 80;
 export const MAX_OPEN_RESPONSE = 60;
-export const MAX_PHRASE_MIRROR = 40;
+export const MAX_PHRASE_MIRROR = 80;
+export const MAX_ENGAGEMENT_DRAFTS = 50;
+export const MIN_DURATION_SEC = 10;
+export const MAX_DURATION_SEC = 3600;
+export const GRACE_MS = 8000;
 
 /** Digits only — attendees type what they see on screen. */
 export function normalizeJoinCode(raw: string): string {
@@ -212,8 +221,12 @@ export function assertEngagementPrompt(raw: unknown): string {
 }
 
 export function assertEngagementType(raw: unknown): EngagementType {
-  if (raw === "mcq" || raw === "open") return raw;
-  throw new Error("Type must be mcq or open");
+  if (raw === "mcq" || raw === "word_cloud" || raw === "open_text") return raw;
+  throw new Error("Type must be mcq, word_cloud, or open_text");
+}
+
+export function isFreeTextEngagement(type: EngagementType): boolean {
+  return type === "word_cloud" || type === "open_text";
 }
 
 export function assertResultsVisibility(
@@ -287,4 +300,165 @@ export function topPhrasesFromMap(
     }))
     .sort((a, b) => b.count - a.count || a.text.localeCompare(b.text))
     .slice(0, limit);
+}
+
+/** Prefer sortOrder; fall back to createdAt for legacy docs. */
+export function engagementSortOrder(data: {
+  sortOrder?: unknown;
+  createdAt?: unknown;
+}): number {
+  if (typeof data.sortOrder === "number" && Number.isFinite(data.sortOrder)) {
+    return data.sortOrder;
+  }
+  const created = Number(data.createdAt ?? 0);
+  return Number.isFinite(created) ? created : 0;
+}
+
+/** Next draft in queue: sortOrder ASC, then createdAt, then id. */
+export function nextDraftId(
+  drafts: { id: string; sortOrder: number; createdAt: number }[],
+): string | null {
+  if (drafts.length === 0) return null;
+  const sorted = [...drafts].sort(
+    (a, b) =>
+      a.sortOrder - b.sortOrder ||
+      a.createdAt - b.createdAt ||
+      a.id.localeCompare(b.id),
+  );
+  return sorted[0]?.id ?? null;
+}
+
+/**
+ * Validate optional timer duration.
+ * null / undefined / "" = untimed; otherwise integer seconds in [10, 3600].
+ */
+export function assertDurationSec(raw: unknown): number | null {
+  if (raw == null || raw === "" || raw === false) return null;
+  const n = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isInteger(n) || n < MIN_DURATION_SEC || n > MAX_DURATION_SEC) {
+    throw new Error(
+      `Duration must be an integer between ${MIN_DURATION_SEC} and ${MAX_DURATION_SEC} seconds`,
+    );
+  }
+  return n;
+}
+
+/** Auto-advance is only meaningful when a duration is set. */
+export function assertAutoAdvance(
+  raw: unknown,
+  durationSec: number | null,
+): boolean {
+  if (durationSec == null) return false;
+  return Boolean(raw);
+}
+
+/**
+ * Whether tallies belong on the public RTDB engagement node.
+ * Hidden live (after_close + not revealed) keeps tallies private only.
+ */
+export function shouldPublicTallies(
+  visibility: string,
+  status: string,
+  resultsRevealed: boolean,
+): boolean {
+  if (status === "closed" || resultsRevealed) return true;
+  if (visibility === "live") return true;
+  return false;
+}
+
+/**
+ * Twin of shouldPublicTallies: Peek node is written only while live + after_close + not revealed.
+ */
+export function shouldWritePrivateTallies(
+  visibility: string,
+  status: string,
+  resultsRevealed: boolean,
+): boolean {
+  return (
+    status === "live" && visibility === "after_close" && !resultsRevealed
+  );
+}
+
+export type ExpireGuardResult = "proceed" | "noop";
+
+export type ExpireNoopReason =
+  | "no_active"
+  | "not_live"
+  | "id_mismatch"
+  | "untimed"
+  | "missing_expected"
+  | "token_mismatch"
+  | "too_early"
+  | "generation_mismatch";
+
+export type ExpireGuardOutcome =
+  | { result: "proceed"; engagementId: string }
+  | { result: "noop"; reason: ExpireNoopReason };
+
+/**
+ * Server-side expire eligibility for timer-driven close.
+ * Untimed prompts never proceed; token must match server-authored liveEndsAt.
+ * Prefer control.activeEngagementId as source of truth when fromId is also set.
+ */
+export function evaluateExpireGuards(input: {
+  activeEngagementId: string | null | undefined;
+  fromEngagementId?: string | null;
+  engStatus: string | null | undefined;
+  liveEndsAt: number | null | undefined;
+  expectedLiveEndsAt: number | null | undefined;
+  now: number;
+  controlGeneration: number;
+  expectedGeneration?: number;
+}): ExpireGuardOutcome {
+  const fromId =
+    typeof input.fromEngagementId === "string" && input.fromEngagementId.trim()
+      ? input.fromEngagementId.trim()
+      : "";
+  const activeId =
+    typeof input.activeEngagementId === "string" &&
+    input.activeEngagementId.trim()
+      ? input.activeEngagementId.trim()
+      : "";
+
+  if (fromId && activeId && fromId !== activeId) {
+    return { result: "noop", reason: "id_mismatch" };
+  }
+
+  const engagementId = activeId || fromId;
+  if (!engagementId) {
+    return { result: "noop", reason: "no_active" };
+  }
+
+  if (input.engStatus !== "live") {
+    return { result: "noop", reason: "not_live" };
+  }
+
+  const liveEndsAt = input.liveEndsAt;
+  if (liveEndsAt == null || !Number.isFinite(Number(liveEndsAt))) {
+    return { result: "noop", reason: "untimed" };
+  }
+  const liveEndsAtNum = Number(liveEndsAt);
+
+  const expected = input.expectedLiveEndsAt;
+  if (expected == null || !Number.isFinite(Number(expected))) {
+    return { result: "noop", reason: "missing_expected" };
+  }
+  const expectedNum = Number(expected);
+
+  if (expectedNum !== liveEndsAtNum) {
+    return { result: "noop", reason: "token_mismatch" };
+  }
+
+  if (input.now < liveEndsAtNum) {
+    return { result: "noop", reason: "too_early" };
+  }
+
+  if (
+    input.expectedGeneration != null &&
+    input.expectedGeneration !== input.controlGeneration
+  ) {
+    return { result: "noop", reason: "generation_mismatch" };
+  }
+
+  return { result: "proceed", engagementId };
 }

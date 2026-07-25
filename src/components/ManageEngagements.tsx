@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { api } from "@/lib/api";
+import { engagementTypeLabel } from "@/lib/engagement";
 import type {
   EngagementDoc,
   EngagementResultsVisibility,
@@ -10,12 +11,35 @@ import type {
 } from "@/lib/types";
 import { downloadTextFile, engagementsToCsv } from "@/lib/utils";
 
+const DURATION_PRESETS: { label: string; value: number | null }[] = [
+  { label: "No timer", value: null },
+  { label: "15 sec", value: 15 },
+  { label: "30 sec", value: 30 },
+  { label: "45 sec", value: 45 },
+  { label: "1 min", value: 60 },
+  { label: "90 sec", value: 90 },
+  { label: "2 min", value: 120 },
+  { label: "5 min", value: 300 },
+];
+
+function durationLabel(sec: number | null | undefined): string | null {
+  if (sec == null) return null;
+  if (sec % 60 === 0) return `${sec / 60} min`;
+  return `${sec} sec`;
+}
+
+function draftSortOrder(d: EngagementDoc): number {
+  return typeof d.sortOrder === "number" ? d.sortOrder : d.createdAt;
+}
+
 function resetFormState() {
   return {
     type: "mcq" as EngagementType,
     prompt: "",
     options: ["", ""],
     resultsVisibility: "live" as EngagementResultsVisibility,
+    durationSec: null as number | null,
+    autoAdvance: false,
   };
 }
 
@@ -32,6 +56,8 @@ export function ManageEngagements({ roomId }: { roomId: string }) {
   const [options, setOptions] = useState(["", ""]);
   const [resultsVisibility, setResultsVisibility] =
     useState<EngagementResultsVisibility>("live");
+  const [durationSec, setDurationSec] = useState<number | null>(null);
+  const [autoAdvance, setAutoAdvance] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<EngagementDoc | null>(null);
   const [deleting, setDeleting] = useState(false);
 
@@ -52,14 +78,19 @@ export function ManageEngagements({ roomId }: { roomId: string }) {
     void load();
   }, [load]);
 
-  const closeForm = () => {
-    setComposeOpen(false);
-    setEditingId(null);
-    const next = resetFormState();
+  const applyFormState = (next: ReturnType<typeof resetFormState>) => {
     setType(next.type);
     setPrompt(next.prompt);
     setOptions(next.options);
     setResultsVisibility(next.resultsVisibility);
+    setDurationSec(next.durationSec);
+    setAutoAdvance(next.autoAdvance);
+  };
+
+  const closeForm = () => {
+    setComposeOpen(false);
+    setEditingId(null);
+    applyFormState(resetFormState());
   };
 
   const openCreate = () => {
@@ -67,11 +98,7 @@ export function ManageEngagements({ roomId }: { roomId: string }) {
       closeForm();
       return;
     }
-    const next = resetFormState();
-    setType(next.type);
-    setPrompt(next.prompt);
-    setOptions(next.options);
-    setResultsVisibility(next.resultsVisibility);
+    applyFormState(resetFormState());
     setEditingId(null);
     setComposeOpen(true);
   };
@@ -87,6 +114,8 @@ export function ManageEngagements({ roomId }: { roomId: string }) {
         : ["", ""],
     );
     setResultsVisibility(eng.resultsVisibility ?? "live");
+    setDurationSec(eng.durationSec ?? null);
+    setAutoAdvance(Boolean(eng.autoAdvance));
     setComposeOpen(true);
     setNotice(null);
     setError(null);
@@ -102,6 +131,7 @@ export function ManageEngagements({ roomId }: { roomId: string }) {
         type === "mcq"
           ? options.map((o) => o.trim()).filter(Boolean)
           : undefined;
+      const nextAuto = durationSec != null && autoAdvance;
       if (editingId) {
         await api.updateEngagement({
           roomId,
@@ -109,6 +139,8 @@ export function ManageEngagements({ roomId }: { roomId: string }) {
           prompt: prompt.trim(),
           options: optionLabels,
           resultsVisibility,
+          durationSec,
+          autoAdvance: nextAuto,
         });
         setNotice("Draft updated.");
       } else {
@@ -118,6 +150,8 @@ export function ManageEngagements({ roomId }: { roomId: string }) {
           prompt: prompt.trim(),
           options: optionLabels,
           resultsVisibility,
+          durationSec,
+          autoAdvance: nextAuto,
           startLive: false,
         });
         setNotice("Draft saved. Go live when you are ready.");
@@ -166,6 +200,59 @@ export function ManageEngagements({ roomId }: { roomId: string }) {
     } finally {
       setBusy(false);
     }
+  };
+
+  const revealOne = async (engagementId: string) => {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      await api.revealEngagementResults({ roomId, engagementId });
+      setNotice("Results revealed to attendees.");
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not reveal");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const drafts = [...items]
+    .filter((e) => e.status === "draft")
+    .sort(
+      (a, b) =>
+        draftSortOrder(a) - draftSortOrder(b) ||
+        a.createdAt - b.createdAt ||
+        a.id.localeCompare(b.id),
+    );
+
+  const moveDraft = async (draftIndex: number, dir: -1 | 1) => {
+    const a = drafts[draftIndex];
+    const b = drafts[draftIndex + dir];
+    if (!a || !b) return;
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      await api.swapEngagementOrder({
+        roomId,
+        aId: a.id,
+        bId: b.id,
+        aOrder: draftSortOrder(a),
+        bOrder: draftSortOrder(b),
+      });
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not reorder");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const draftPosition = (id: string) => drafts.findIndex((d) => d.id === id);
+
+  const openPresent = () => {
+    window.open(`/rooms/${roomId}/present`, "_blank", "noopener");
   };
 
   const exportOne = async (engagementId: string) => {
@@ -239,6 +326,13 @@ export function ManageEngagements({ roomId }: { roomId: string }) {
           <button
             type="button"
             className="btn btn-outline btn-sm"
+            onClick={openPresent}
+          >
+            Open present view
+          </button>
+          <button
+            type="button"
+            className="btn btn-outline btn-sm"
             disabled={busy || items.length === 0}
             onClick={() => void exportAll()}
           >
@@ -294,19 +388,34 @@ export function ManageEngagements({ roomId }: { roomId: string }) {
                 onClick={() => setType("mcq")}
               >
                 <span className="font-semibold">Multiple choice</span>
+                <span className="mt-0.5 block text-xs text-[var(--ink-soft)]">
+                  Single select, live bars
+                </span>
               </button>
               <button
                 type="button"
-                className={`mode-card flex-1 text-left ${type === "open" ? "mode-card-on" : ""}`}
-                onClick={() => setType("open")}
+                className={`mode-card flex-1 text-left ${type === "word_cloud" ? "mode-card-on" : ""}`}
+                onClick={() => setType("word_cloud")}
               >
-                <span className="font-semibold">Open text</span>
+                <span className="font-semibold">Word cloud</span>
+                <span className="mt-0.5 block text-xs text-[var(--ink-soft)]">
+                  One or two words; live cloud
+                </span>
+              </button>
+              <button
+                type="button"
+                className={`mode-card flex-1 text-left ${type === "open_text" ? "mode-card-on" : ""}`}
+                onClick={() => setType("open_text")}
+              >
+                <span className="font-semibold">Short answers</span>
+                <span className="mt-0.5 block text-xs text-[var(--ink-soft)]">
+                  Short written answers; grouped feed
+                </span>
               </button>
             </div>
           ) : (
             <p className="text-xs text-[var(--ink-muted)]">
-              {type === "mcq" ? "Multiple choice" : "Open text"} (type cannot be
-              changed)
+              {engagementTypeLabel(type)} (type cannot be changed)
             </p>
           )}
           <label className="block space-y-1">
@@ -360,6 +469,43 @@ export function ManageEngagements({ roomId }: { roomId: string }) {
               </div>
             </div>
           ) : null}
+          <div className="grid gap-3 sm:grid-cols-2">
+            <label className="block space-y-1">
+              <span className="label-caps">Timer</span>
+              <select
+                className="field"
+                value={durationSec == null ? "" : String(durationSec)}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  const next = v === "" ? null : Number(v);
+                  setDurationSec(next);
+                  if (next == null) setAutoAdvance(false);
+                }}
+              >
+                {DURATION_PRESETS.map((p) => (
+                  <option
+                    key={p.label}
+                    value={p.value == null ? "" : String(p.value)}
+                  >
+                    {p.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="flex items-center gap-2 self-end pb-2 text-sm">
+              <input
+                type="checkbox"
+                checked={autoAdvance}
+                disabled={durationSec == null}
+                onChange={(e) => setAutoAdvance(e.target.checked)}
+              />
+              <span
+                className={durationSec == null ? "text-[var(--ink-muted)]" : ""}
+              >
+                Auto-advance to next draft when time is up
+              </span>
+            </label>
+          </div>
           <fieldset className="space-y-2">
             <legend className="label-caps">Results</legend>
             <label className="flex items-start gap-2 text-sm">
@@ -420,7 +566,15 @@ export function ManageEngagements({ roomId }: { roomId: string }) {
             className="flex flex-wrap items-start justify-between gap-3 px-3 py-3"
           >
             <div className="min-w-0 flex-1">
-              <div className="mb-1 flex flex-wrap gap-1.5">
+              <div className="mb-1 flex flex-wrap items-center gap-1.5">
+                {eng.status === "draft" ? (
+                  <span
+                    className={`engage-queue-num ${draftPosition(eng.id) === 0 ? "engage-queue-num-next" : ""}`}
+                    aria-hidden
+                  >
+                    {draftPosition(eng.id) + 1}
+                  </span>
+                ) : null}
                 <span className="badge">
                   {eng.status === "live"
                     ? "Live"
@@ -429,8 +583,14 @@ export function ManageEngagements({ roomId }: { roomId: string }) {
                       : "Closed"}
                 </span>
                 <span className="badge">
-                  {eng.type === "mcq" ? "Multiple choice" : "Open text"}
+                  {engagementTypeLabel(eng.type)}
                 </span>
+                {durationLabel(eng.durationSec) ? (
+                  <span className="badge">{durationLabel(eng.durationSec)}</span>
+                ) : null}
+                {eng.autoAdvance ? (
+                  <span className="badge badge-gold">Auto</span>
+                ) : null}
                 <span className="badge">
                   {eng.resultsVisibility === "after_close"
                     ? "Hide until closed"
@@ -457,6 +617,26 @@ export function ManageEngagements({ roomId }: { roomId: string }) {
                 <>
                   <button
                     type="button"
+                    className="engage-queue-move"
+                    disabled={busy || draftPosition(eng.id) <= 0}
+                    aria-label="Move up"
+                    onClick={() => void moveDraft(draftPosition(eng.id), -1)}
+                  >
+                    ↑
+                  </button>
+                  <button
+                    type="button"
+                    className="engage-queue-move"
+                    disabled={
+                      busy || draftPosition(eng.id) >= drafts.length - 1
+                    }
+                    aria-label="Move down"
+                    onClick={() => void moveDraft(draftPosition(eng.id), 1)}
+                  >
+                    ↓
+                  </button>
+                  <button
+                    type="button"
                     className="btn btn-outline btn-sm"
                     disabled={busy}
                     onClick={() => openEdit(eng)}
@@ -474,14 +654,27 @@ export function ManageEngagements({ roomId }: { roomId: string }) {
                 </>
               ) : null}
               {eng.status === "live" ? (
-                <button
-                  type="button"
-                  className="btn btn-outline btn-sm"
-                  disabled={busy}
-                  onClick={() => void closeOne(eng.id)}
-                >
-                  Close
-                </button>
+                <>
+                  {eng.resultsVisibility === "after_close" &&
+                  !eng.resultsRevealed ? (
+                    <button
+                      type="button"
+                      className="btn btn-secondary btn-sm"
+                      disabled={busy}
+                      onClick={() => void revealOne(eng.id)}
+                    >
+                      Reveal
+                    </button>
+                  ) : null}
+                  <button
+                    type="button"
+                    className="btn btn-outline btn-sm"
+                    disabled={busy}
+                    onClick={() => void closeOne(eng.id)}
+                  >
+                    Close
+                  </button>
+                </>
               ) : null}
               {eng.status !== "draft" ? (
                 <button

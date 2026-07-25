@@ -161,7 +161,7 @@ export function engagementsToCsv(engagements: EngagementExportRow[]): string {
           [
             "tally",
             csvEscape(eng.id),
-            "open",
+            csvEscape(eng.type),
             csvEscape(eng.status),
             csvEscape(eng.prompt),
             csvEscape(p.text),
@@ -178,7 +178,7 @@ export function engagementsToCsv(engagements: EngagementExportRow[]): string {
           [
             "response",
             csvEscape(eng.id),
-            "open",
+            csvEscape(eng.type),
             csvEscape(eng.status),
             csvEscape(eng.prompt),
             "",

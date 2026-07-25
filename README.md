@@ -16,9 +16,10 @@ Firebase web config is committed in `src/lib/firebase/config.ts` (client keys ar
 - Room access modes: **public**, **allowlist**, **join_code**, **hybrid**
 - Optional **anonymous rooms** (Ask authors shown as Anonymous)
 - **Ask** — live question board with upvotes (toggle on/off; one vote per person)
-- **Engage** — organizer MCQ and open-text prompts (`draft` → `live` → `closed`; one live at a time)
+- **Engage** — organizer MCQ, word cloud, and short-answer prompts (`draft` → `live` → `closed`; one live at a time)
   - Attendees: select then submit (MCQ); answers lock after submit; results after answer or after close
-  - Organizers: draft edit before go-live, screen-share friendly tallies, CSV export
+  - Organizers: draft edit before go-live, ordered "up next" queue (reorder / go live), optional per-prompt timer with auto-advance, Peek + Reveal for hidden-until-closed results, screen-share friendly tallies, CSV export
+  - **Present view** (`/rooms/[id]/present`, noindex): a large projector screen showing the live prompt, response count, results (once revealed/closed), a live countdown, and a "Next prompt in N…" freeze during auto-advance
 - Organizer moderation: delete questions, mark answered, close engagements
 - Organizer controls: lock new questions, view-only, allowlist, join-code rotate, delete room, **CSV export** (Ask + Engage)
 - Private rooms: member list, search, remove, CSV export (Manage)
@@ -78,6 +79,7 @@ Against emulators: set `useFirebaseEmulators = true` in `src/lib/firebase/config
 - `/rooms/[id]` — live room (Ask + Engage tabs)
 - `/rooms/[id]/join` — room-specific code gate
 - `/rooms/[id]/manage` — organizer controls (Ask settings, Engage prep, members)
+- `/rooms/[id]/present` — projector view for the live Engage prompt (`noindex`)
 - `/admin` — super-admin console (`noindex`)
 - `/terms` · `/privacy` — legal
 - `/sitemap.xml` · `/robots.txt` — SEO
@@ -109,6 +111,7 @@ Against emulators: set `useFirebaseEmulators = true` in `src/lib/firebase/config
 | `rooms/{slug}/meta` | Live flags |
 | `rooms/{slug}/questions/{qid}` | Live Ask board |
 | `rooms/{slug}/engagements/{eid}` | Live Engage board (tallies / phrases) |
+| `rooms/{slug}/engageControl` | Public engage control (phase / advanceAt / generation) for Present + grace |
 | `access/{uid}/{slug}` | Membership bit |
 | `userVotes/{uid}/{slug}/{qid}` | Vote flags |
 | `userEngagementResponses/{uid}/{slug}/{eid}` | Own Engage answers |

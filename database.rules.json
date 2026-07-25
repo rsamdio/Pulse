@@ -12,7 +12,18 @@
         },
         "engagements": {
           ".read": "auth != null && (root.child('access').child(auth.uid).child($roomId).val() === true || root.child('rooms').child($roomId).child('meta').child('accessMode').val() === 'public')"
+        },
+        "engageControl": {
+          ".read": "auth != null && (root.child('access').child(auth.uid).child($roomId).val() === true || root.child('rooms').child($roomId).child('meta').child('accessMode').val() === 'public')"
+        },
+        "private": {
+          ".read": "auth != null && (root.child('rooms').child($roomId).child('meta').child('organizerId').val() === auth.uid || root.child('platformAdmins').child(auth.uid).val() === true)"
         }
+      }
+    },
+    "platformAdmins": {
+      "$uid": {
+        ".read": "auth != null && auth.uid === $uid"
       }
     },
     "access": {

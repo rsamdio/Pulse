@@ -1,14 +1,48 @@
 "use client";
 
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  type FormEvent,
+} from "react";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { EngageCountdown } from "@/components/EngageCountdown";
 import { api } from "@/lib/api";
+import { engagementTypeLabel, isFreeTextEngagement } from "@/lib/engagement";
+import { useEngagementExpiry } from "@/lib/hooks/useEngagementExpiry";
+import { layoutWordCloud } from "@/lib/wordCloudLayout";
 import type {
+  DraftQueueEntry,
+  EngageControlRtdb,
   EngagementDoc,
   EngagementResultsVisibility,
   EngagementType,
   EngagementView,
+  PrivateEngagementResult,
 } from "@/lib/types";
+
+const DURATION_PRESETS: { label: string; value: number | null }[] = [
+  { label: "No timer", value: null },
+  { label: "15 sec", value: 15 },
+  { label: "30 sec", value: 30 },
+  { label: "45 sec", value: 45 },
+  { label: "1 min", value: 60 },
+  { label: "90 sec", value: 90 },
+  { label: "2 min", value: 120 },
+  { label: "5 min", value: 300 },
+];
+
+function durationLabel(sec: number | null | undefined): string | null {
+  if (sec == null) return null;
+  if (sec % 60 === 0) return `${sec / 60} min`;
+  return `${sec} sec`;
+}
+
+function draftSortOrder(d: EngagementDoc): number {
+  return typeof d.sortOrder === "number" ? d.sortOrder : d.createdAt;
+}
 
 export function EngagementPane({
   roomId,
@@ -17,6 +51,10 @@ export function EngagementPane({
   isOrganizer,
   canRespond,
   loading,
+  privateResults = {},
+  draftQueue = null,
+  control = null,
+  serverOffset = 0,
 }: {
   roomId: string;
   engagements: EngagementView[];
@@ -24,6 +62,10 @@ export function EngagementPane({
   isOrganizer: boolean;
   canRespond: boolean;
   loading: boolean;
+  privateResults?: Record<string, PrivateEngagementResult>;
+  draftQueue?: Record<string, DraftQueueEntry> | null;
+  control?: EngageControlRtdb | null;
+  serverOffset?: number;
 }) {
   const [drafts, setDrafts] = useState<EngagementDoc[]>([]);
   const [composeOpen, setComposeOpen] = useState(false);
@@ -33,12 +75,28 @@ export function EngagementPane({
   const [options, setOptions] = useState(["", ""]);
   const [resultsVisibility, setResultsVisibility] =
     useState<EngagementResultsVisibility>("live");
+  const [durationSec, setDurationSec] = useState<number | null>(null);
+  const [autoAdvance, setAutoAdvance] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [peekOpen, setPeekOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<
     EngagementView | EngagementDoc | null
   >(null);
   const [deleting, setDeleting] = useState(false);
+  const [skipTarget, setSkipTarget] = useState<EngagementDoc | null>(null);
+  const [closeConfirm, setCloseConfirm] = useState(false);
+
+  // Host backstop: fire expiry / grace completion when timers elapse.
+  useEngagementExpiry({
+    roomId,
+    enabled: isOrganizer,
+    phase: control?.phase,
+    generation: control?.generation,
+    advanceAt: control?.advanceAt ?? null,
+    liveEndsAt: live?.liveEndsAt ?? null,
+    serverOffset,
+  });
 
   const resetCompose = () => {
     setEditingId(null);
@@ -46,6 +104,8 @@ export function EngagementPane({
     setPrompt("");
     setOptions(["", ""]);
     setResultsVisibility("live");
+    setDurationSec(null);
+    setAutoAdvance(false);
     setComposeOpen(false);
   };
 
@@ -62,20 +122,24 @@ export function EngagementPane({
     }
   }, [isOrganizer, roomId]);
 
+  // Reload drafts when the mirrored draft queue changes (not on countdown ticks).
+  const draftSignature = draftQueue
+    ? Object.entries(draftQueue)
+        .map(([id, e]) => `${id}:${e.sortOrder}`)
+        .sort()
+        .join("|")
+    : "";
+
   useEffect(() => {
     void loadDrafts();
-  }, [loadDrafts]);
+  }, [loadDrafts, draftSignature]);
 
   const openCreate = () => {
     if (composeOpen && !editingId) {
       resetCompose();
       return;
     }
-    setEditingId(null);
-    setType("mcq");
-    setPrompt("");
-    setOptions(["", ""]);
-    setResultsVisibility("live");
+    resetCompose();
     setComposeOpen(true);
   };
 
@@ -89,6 +153,8 @@ export function EngagementPane({
         : ["", ""],
     );
     setResultsVisibility(eng.resultsVisibility ?? "live");
+    setDurationSec(eng.durationSec ?? null);
+    setAutoAdvance(Boolean(eng.autoAdvance));
     setComposeOpen(true);
     setError(null);
   };
@@ -103,6 +169,7 @@ export function EngagementPane({
         type === "mcq"
           ? options.map((o) => o.trim()).filter(Boolean)
           : undefined;
+      const nextAuto = durationSec != null && autoAdvance;
       if (editingId) {
         await api.updateEngagement({
           roomId,
@@ -110,6 +177,8 @@ export function EngagementPane({
           prompt: prompt.trim(),
           options: optionLabels,
           resultsVisibility,
+          durationSec,
+          autoAdvance: nextAuto,
         });
       } else {
         await api.createEngagement({
@@ -118,6 +187,8 @@ export function EngagementPane({
           prompt: prompt.trim(),
           options: optionLabels,
           resultsVisibility,
+          durationSec,
+          autoAdvance: nextAuto,
           startLive: false,
         });
       }
@@ -146,6 +217,7 @@ export function EngagementPane({
       setError(err instanceof Error ? err.message : "Could not go live");
     } finally {
       setBusy(false);
+      setSkipTarget(null);
     }
   };
 
@@ -159,6 +231,53 @@ export function EngagementPane({
       setError(err instanceof Error ? err.message : "Could not close");
     } finally {
       setBusy(false);
+      setCloseConfirm(false);
+    }
+  };
+
+  const requestClose = () => {
+    if (live?.autoAdvance && drafts.length > 0) {
+      setCloseConfirm(true);
+    } else {
+      void closeLive();
+    }
+  };
+
+  const revealResults = async () => {
+    if (!live) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await api.revealEngagementResults({ roomId, engagementId: live.id });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not reveal");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const startNext = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.advanceEngagement({ roomId, fromEngagementId: live?.id });
+      await loadDrafts();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not start next");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const cancelNext = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.cancelNextEngagement({ roomId });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not cancel");
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -167,10 +286,7 @@ export function EngagementPane({
     setDeleting(true);
     setError(null);
     try {
-      await api.deleteEngagement({
-        roomId,
-        engagementId: deleteTarget.id,
-      });
+      await api.deleteEngagement({ roomId, engagementId: deleteTarget.id });
       if (editingId === deleteTarget.id) resetCompose();
       setDeleteTarget(null);
       await loadDrafts();
@@ -180,6 +296,55 @@ export function EngagementPane({
     } finally {
       setDeleting(false);
     }
+  };
+
+  const sortedDrafts = useMemo(
+    () =>
+      [...drafts].sort(
+        (a, b) =>
+          draftSortOrder(a) - draftSortOrder(b) ||
+          a.createdAt - b.createdAt ||
+          a.id.localeCompare(b.id),
+      ),
+    [drafts],
+  );
+
+  const moveDraft = async (index: number, dir: -1 | 1) => {
+    const a = sortedDrafts[index];
+    const b = sortedDrafts[index + dir];
+    if (!a || !b) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await api.swapEngagementOrder({
+        roomId,
+        aId: a.id,
+        bId: b.id,
+        aOrder: draftSortOrder(a),
+        bOrder: draftSortOrder(b),
+      });
+      await loadDrafts();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not reorder");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const requestGoLive = (draft: EngagementDoc, index: number) => {
+    if (index > 0) setSkipTarget(draft);
+    else void goLive(draft.id);
+  };
+
+  const phase = control?.phase ?? "idle";
+  const showStartNext = isOrganizer && sortedDrafts.length > 0;
+  const reservedPrompt =
+    control?.reservedNextId && draftQueue?.[control.reservedNextId]
+      ? draftQueue[control.reservedNextId].prompt
+      : null;
+
+  const openPresent = () => {
+    window.open(`/rooms/${roomId}/present`, "_blank", "noopener");
   };
 
   return (
@@ -196,14 +361,23 @@ export function EngagementPane({
           </p>
         </div>
         {isOrganizer ? (
-          <button
-            type="button"
-            className="btn btn-primary btn-sm"
-            disabled={busy}
-            onClick={openCreate}
-          >
-            {composeOpen && !editingId ? "Cancel" : "New draft"}
-          </button>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              className="btn btn-outline btn-sm"
+              onClick={openPresent}
+            >
+              Open present view
+            </button>
+            <button
+              type="button"
+              className="btn btn-primary btn-sm"
+              disabled={busy}
+              onClick={openCreate}
+            >
+              {composeOpen && !editingId ? "Cancel" : "New draft"}
+            </button>
+          </div>
         ) : null}
       </div>
 
@@ -211,6 +385,56 @@ export function EngagementPane({
         <p className="rounded-xl border border-[var(--danger-soft)] bg-[var(--danger-soft)] px-3 py-2 text-sm text-[var(--danger)]">
           {error}
         </p>
+      ) : null}
+
+      {isOrganizer && phase === "grace" ? (
+        <div className="engage-grace-banner" role="status" aria-live="polite">
+          <div className="min-w-0">
+            <p className="engage-grace-title">
+              Next prompt starting in{" "}
+              <EngageCountdown
+                liveEndsAt={control?.advanceAt ?? null}
+                serverOffset={serverOffset}
+                warningUnderSec={4}
+              />
+            </p>
+            {reservedPrompt ? (
+              <p className="engage-grace-sub line-clamp-1">{reservedPrompt}</p>
+            ) : null}
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              className="btn btn-outline btn-sm"
+              disabled={busy}
+              onClick={() => void cancelNext()}
+            >
+              Cancel next
+            </button>
+            <button
+              type="button"
+              className="btn btn-primary btn-sm"
+              disabled={busy}
+              onClick={() => void startNext()}
+            >
+              Start now
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      {isOrganizer && phase === "held" && sortedDrafts.length > 0 ? (
+        <div className="engage-grace-banner" role="status">
+          <p className="engage-grace-title">Auto-advance paused</p>
+          <button
+            type="button"
+            className="btn btn-primary btn-sm"
+            disabled={busy}
+            onClick={() => void startNext()}
+          >
+            Start next
+          </button>
+        </div>
       ) : null}
 
       {isOrganizer && composeOpen ? (
@@ -244,19 +468,28 @@ export function EngagementPane({
               </button>
               <button
                 type="button"
-                className={`mode-card flex-1 text-left ${type === "open" ? "mode-card-on" : ""}`}
-                onClick={() => setType("open")}
+                className={`mode-card flex-1 text-left ${type === "word_cloud" ? "mode-card-on" : ""}`}
+                onClick={() => setType("word_cloud")}
               >
-                <span className="font-semibold">Open text</span>
+                <span className="font-semibold">Word cloud</span>
                 <span className="mt-0.5 block text-xs text-[var(--ink-soft)]">
-                  Short answers, word cloud
+                  One or two words; live cloud
+                </span>
+              </button>
+              <button
+                type="button"
+                className={`mode-card flex-1 text-left ${type === "open_text" ? "mode-card-on" : ""}`}
+                onClick={() => setType("open_text")}
+              >
+                <span className="font-semibold">Short answers</span>
+                <span className="mt-0.5 block text-xs text-[var(--ink-soft)]">
+                  Short written answers; grouped feed
                 </span>
               </button>
             </div>
           ) : (
             <p className="text-xs text-[var(--ink-muted)]">
-              {type === "mcq" ? "Multiple choice" : "Open text"} (type cannot be
-              changed)
+              {engagementTypeLabel(type)} (type cannot be changed)
             </p>
           )}
           <label className="block space-y-1">
@@ -310,23 +543,72 @@ export function EngagementPane({
               </div>
             </div>
           ) : null}
+          <div className="grid gap-3 sm:grid-cols-2">
+            <label className="block space-y-1">
+              <span className="label-caps">Timer</span>
+              <select
+                className="field"
+                value={durationSec == null ? "" : String(durationSec)}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  const next = v === "" ? null : Number(v);
+                  setDurationSec(next);
+                  if (next == null) setAutoAdvance(false);
+                }}
+              >
+                {DURATION_PRESETS.map((p) => (
+                  <option
+                    key={p.label}
+                    value={p.value == null ? "" : String(p.value)}
+                  >
+                    {p.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="flex items-center gap-2 self-end pb-2 text-sm">
+              <input
+                type="checkbox"
+                checked={autoAdvance}
+                disabled={durationSec == null}
+                onChange={(e) => setAutoAdvance(e.target.checked)}
+              />
+              <span
+                className={durationSec == null ? "text-[var(--ink-muted)]" : ""}
+              >
+                Auto-advance to next draft when time is up
+              </span>
+            </label>
+          </div>
           <fieldset className="space-y-2">
             <legend className="label-caps">Results</legend>
             <label className="flex items-start gap-2 text-sm">
               <input
                 type="radio"
+                name="pane-results-visibility"
                 checked={resultsVisibility === "live"}
                 onChange={() => setResultsVisibility("live")}
               />
-              <span>After each person answers</span>
+              <span>
+                <span className="font-semibold">After each person answers</span>
+                <span className="mt-0.5 block text-xs text-[var(--ink-soft)]">
+                  Attendees see tallies once they answer; you always see them
+                </span>
+              </span>
             </label>
             <label className="flex items-start gap-2 text-sm">
               <input
                 type="radio"
+                name="pane-results-visibility"
                 checked={resultsVisibility === "after_close"}
                 onChange={() => setResultsVisibility("after_close")}
               />
-              <span>Hide from attendees until closed</span>
+              <span>
+                <span className="font-semibold">Hide until closed</span>
+                <span className="mt-0.5 block text-xs text-[var(--ink-soft)]">
+                  Attendees see results after close; you can Peek anytime
+                </span>
+              </span>
             </label>
           </fieldset>
           {live ? (
@@ -344,30 +626,66 @@ export function EngagementPane({
         </form>
       ) : null}
 
-      {isOrganizer && drafts.length > 0 ? (
+      {isOrganizer && sortedDrafts.length > 0 ? (
         <div className="space-y-2">
-          <p className="label-caps">Drafts</p>
-          {drafts.map((d) => (
-            <div
-              key={d.id}
-              className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-[var(--line)] bg-[var(--surface)] px-3 py-2.5"
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="label-caps">Up next queue</p>
+            <button
+              type="button"
+              className="btn btn-secondary btn-sm"
+              disabled={busy}
+              onClick={() => void startNext()}
             >
+              {live ? "Close & start next" : "Start next"}
+            </button>
+          </div>
+          {sortedDrafts.map((d, index) => (
+            <div key={d.id} className="engage-draft-row">
+              <span
+                className={`engage-queue-num ${index === 0 ? "engage-queue-num-next" : ""}`}
+                aria-hidden
+              >
+                {index + 1}
+              </span>
               <div className="min-w-0 flex-1">
                 <p className="text-sm font-semibold line-clamp-2">{d.prompt}</p>
-                <p className="text-xs text-[var(--ink-muted)]">
-                  {d.type === "mcq" ? "Multiple choice" : "Open text"}
-                  {" · "}
-                  {d.resultsVisibility === "after_close"
-                    ? "Hide until closed"
-                    : "After each answers"}
-                </p>
-                {d.type === "mcq" && d.options.length > 0 ? (
-                  <ol className="mt-1 list-decimal space-y-0.5 pl-4 text-xs text-[var(--ink-soft)]">
-                    {d.options.map((opt) => (
-                      <li key={opt.id}>{opt.label}</li>
-                    ))}
-                  </ol>
-                ) : null}
+                <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                  {index === 0 ? (
+                    <span className="badge badge-live">Up next</span>
+                  ) : null}
+                  <span className="badge">{engagementTypeLabel(d.type)}</span>
+                  {durationLabel(d.durationSec) ? (
+                    <span className="badge">{durationLabel(d.durationSec)}</span>
+                  ) : null}
+                  {d.autoAdvance ? (
+                    <span className="badge badge-gold">Auto</span>
+                  ) : null}
+                  <span className="badge">
+                    {d.resultsVisibility === "after_close"
+                      ? "Hide until closed"
+                      : "Live results"}
+                  </span>
+                </div>
+              </div>
+              <div className="flex flex-col items-center gap-1">
+                <button
+                  type="button"
+                  className="engage-queue-move"
+                  disabled={busy || index === 0}
+                  aria-label="Move up"
+                  onClick={() => void moveDraft(index, -1)}
+                >
+                  ↑
+                </button>
+                <button
+                  type="button"
+                  className="engage-queue-move"
+                  disabled={busy || index === sortedDrafts.length - 1}
+                  aria-label="Move down"
+                  onClick={() => void moveDraft(index, 1)}
+                >
+                  ↓
+                </button>
               </div>
               <div className="flex flex-wrap gap-2">
                 <button
@@ -382,7 +700,7 @@ export function EngagementPane({
                   type="button"
                   className="btn btn-primary btn-sm"
                   disabled={busy}
-                  onClick={() => void goLive(d.id)}
+                  onClick={() => requestGoLive(d, index)}
                 >
                   Go live
                 </button>
@@ -404,7 +722,7 @@ export function EngagementPane({
         <p className="text-sm text-[var(--ink-muted)]">Loading engagements…</p>
       ) : null}
 
-      {!loading && engagements.length === 0 && drafts.length === 0 ? (
+      {!loading && engagements.length === 0 && sortedDrafts.length === 0 ? (
         <div className="empty-board">
           <p className="font-[family-name:var(--font-display)] text-lg">
             No engagements yet
@@ -426,7 +744,14 @@ export function EngagementPane({
             isOrganizer={isOrganizer}
             canRespond={canRespond}
             busy={busy}
-            onClose={eng.status === "live" ? () => void closeLive() : undefined}
+            serverOffset={serverOffset}
+            privateResult={privateResults[eng.id]}
+            peekOpen={peekOpen}
+            showStartNext={showStartNext}
+            onClose={eng.status === "live" ? requestClose : undefined}
+            onReveal={eng.status === "live" ? () => void revealResults() : undefined}
+            onTogglePeek={() => setPeekOpen((v) => !v)}
+            onStartNext={() => void startNext()}
             onDelete={() => setDeleteTarget(eng)}
             onError={setError}
           />
@@ -455,6 +780,51 @@ export function EngagementPane({
         }}
         onConfirm={() => void confirmDelete()}
       />
+
+      <ConfirmDialog
+        open={Boolean(skipTarget)}
+        title="Skip ahead in the queue?"
+        description={
+          skipTarget ? (
+            <>
+              <p className="mb-2 font-medium line-clamp-2">
+                “{skipTarget.prompt}”
+              </p>
+              <p>
+                This draft is not first in the queue. Going live now skips the
+                ones ahead of it (they stay as drafts).
+              </p>
+            </>
+          ) : null
+        }
+        confirmLabel="Go live"
+        cancelLabel="Keep order"
+        busy={busy}
+        onCancel={() => {
+          if (!busy) setSkipTarget(null);
+        }}
+        onConfirm={() => {
+          if (skipTarget) void goLive(skipTarget.id);
+        }}
+      />
+
+      <ConfirmDialog
+        open={closeConfirm}
+        title="Close this prompt now?"
+        description={
+          <p>
+            This prompt is set to auto-advance. Closing now stops the timer and
+            keeps the room on its results instead of moving on.
+          </p>
+        }
+        confirmLabel="Close now"
+        cancelLabel="Keep live"
+        busy={busy}
+        onCancel={() => {
+          if (!busy) setCloseConfirm(false);
+        }}
+        onConfirm={() => void closeLive()}
+      />
     </div>
   );
 }
@@ -465,7 +835,14 @@ function EngagementCard({
   isOrganizer,
   canRespond,
   busy,
+  serverOffset,
+  privateResult,
+  peekOpen,
+  showStartNext,
   onClose,
+  onReveal,
+  onTogglePeek,
+  onStartNext,
   onDelete,
   onError,
 }: {
@@ -474,7 +851,14 @@ function EngagementCard({
   isOrganizer: boolean;
   canRespond: boolean;
   busy: boolean;
+  serverOffset: number;
+  privateResult?: PrivateEngagementResult;
+  peekOpen: boolean;
+  showStartNext: boolean;
   onClose?: () => void;
+  onReveal?: () => void;
+  onTogglePeek?: () => void;
+  onStartNext?: () => void;
   onDelete: () => void;
   onError: (msg: string | null) => void;
 }) {
@@ -483,37 +867,53 @@ function EngagementCard({
     engagement.myOptionId ?? null,
   );
   const [submitting, setSubmitting] = useState(false);
-  const total = Math.max(1, engagement.responseCount);
+
   const isLive = engagement.status === "live";
+  const closed = engagement.status === "closed";
+  const revealed = Boolean(engagement.resultsRevealed) || closed;
   const hasAnswered = Boolean(engagement.myOptionId || engagement.myText);
   const canAnswer = isLive && canRespond && !hasAnswered;
   const visibility = engagement.resultsVisibility ?? "live";
+
+  const canPeek =
+    isOrganizer && isLive && visibility === "after_close" && !revealed;
+  const peeking = canPeek && peekOpen;
+  // Private stream can lag; never paint empty public tallies as 0% Peek.
+  const peekReady = Boolean(privateResult);
+
   const showTallies =
-    isOrganizer ||
-    engagement.status === "closed" ||
-    (visibility === "live" && hasAnswered);
+    visibility === "live"
+      ? isOrganizer || hasAnswered || closed
+      : revealed || (isOrganizer && peekOpen && peekReady);
+
+  // When peeking, use private tallies only (no public fallback).
+  const effOptionCounts = peeking
+    ? (privateResult?.optionCounts ?? {})
+    : (engagement.optionCounts ?? {});
+  const effPhrases = peeking
+    ? (privateResult?.phrases ?? [])
+    : (engagement.phrases ?? []);
+
+  const total = Math.max(1, engagement.responseCount);
 
   const resultsHint = (() => {
     if (showTallies || !isLive) return null;
     if (visibility === "after_close") {
-      return "Results appear when the host closes this prompt.";
+      if (isOrganizer) return "Results hidden from attendees until you reveal or close. Peek to preview.";
+      return hasAnswered
+        ? "Results appear when the host closes this prompt."
+        : null;
     }
-    if (!hasAnswered) {
-      return "Answer to see live results.";
-    }
+    if (!hasAnswered) return "Answer to see live results.";
     return null;
   })();
 
   useEffect(() => {
-    if (engagement.myText != null) {
-      setOpenText(engagement.myText);
-    }
+    if (engagement.myText != null) setOpenText(engagement.myText);
   }, [engagement.myText]);
 
   useEffect(() => {
-    if (engagement.myOptionId) {
-      setSelectedOptionId(engagement.myOptionId);
-    }
+    if (engagement.myOptionId) setSelectedOptionId(engagement.myOptionId);
   }, [engagement.myOptionId]);
 
   const submitMcq = async () => {
@@ -551,11 +951,23 @@ function EngagementCard({
     }
   };
 
-  const sortedPhrases = [...(engagement.phrases ?? [])].sort(
-    (a, b) => b.count - a.count || a.text.localeCompare(b.text),
+  const sortedPhrases = useMemo(
+    () =>
+      [...effPhrases].sort(
+        (a, b) => b.count - a.count || a.text.localeCompare(b.text),
+      ),
+    [effPhrases],
   );
-  const maxPhraseCount = Math.max(1, ...sortedPhrases.map((p) => p.count));
+  const cloudItems = useMemo(
+    () =>
+      engagement.type === "word_cloud" ? layoutWordCloud(sortedPhrases) : [],
+    [engagement.type, sortedPhrases],
+  );
   const openRemaining = 60 - openText.length;
+  const freeTextPlaceholder =
+    engagement.type === "word_cloud"
+      ? "Type a word or two…"
+      : "Type your answer…";
 
   return (
     <article
@@ -569,20 +981,29 @@ function EngagementCard({
     >
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0 flex-1 space-y-2">
-          <div className="flex flex-wrap gap-1.5">
+          <div className="flex flex-wrap items-center gap-1.5">
             {isLive ? (
               <span className="badge badge-live">Live</span>
             ) : (
               <span className="badge">Closed</span>
             )}
+            {isLive && engagement.liveEndsAt != null ? (
+              <EngageCountdown
+                liveEndsAt={engagement.liveEndsAt}
+                serverOffset={serverOffset}
+              />
+            ) : null}
             {hasAnswered ? (
               <span className="badge badge-green">Answered</span>
             ) : null}
             <span className="badge">
-              {engagement.type === "mcq" ? "Multiple choice" : "Open text"}
+              {engagementTypeLabel(engagement.type)}
             </span>
-            {visibility === "after_close" ? (
+            {isOrganizer && visibility === "after_close" ? (
               <span className="badge">Hide until closed</span>
+            ) : null}
+            {isOrganizer && engagement.autoAdvance ? (
+              <span className="badge badge-gold">Auto</span>
             ) : null}
           </div>
           <h3 className="engage-prompt">{engagement.prompt}</h3>
@@ -593,15 +1014,45 @@ function EngagementCard({
           </p>
         </div>
         {isOrganizer ? (
-          <div className="flex flex-wrap gap-2">
+          <div className="flex flex-wrap justify-end gap-2">
             {onClose ? (
               <button
                 type="button"
-                className="btn btn-outline btn-sm"
+                className="btn btn-primary btn-sm"
                 disabled={busy || submitting}
                 onClick={onClose}
               >
                 Close
+              </button>
+            ) : null}
+            {canPeek && onReveal ? (
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                disabled={busy || submitting}
+                onClick={onReveal}
+              >
+                Reveal
+              </button>
+            ) : null}
+            {canPeek && onTogglePeek ? (
+              <button
+                type="button"
+                className="btn btn-outline btn-sm"
+                disabled={busy || submitting}
+                onClick={onTogglePeek}
+              >
+                {peekOpen ? "Hide peek" : "Peek"}
+              </button>
+            ) : null}
+            {isLive && showStartNext && onStartNext ? (
+              <button
+                type="button"
+                className="btn btn-outline btn-sm"
+                disabled={busy || submitting}
+                onClick={onStartNext}
+              >
+                Start next
               </button>
             ) : null}
             <button
@@ -616,10 +1067,18 @@ function EngagementCard({
         ) : null}
       </div>
 
+      {peeking ? (
+        <p className="engage-peek-banner" role="status">
+          {peekReady
+            ? "Peeking at live results. Attendees can’t see these until you reveal or close."
+            : "Loading peek…"}
+        </p>
+      ) : null}
+
       {engagement.type === "mcq" ? (
         <div className="engage-options" role="radiogroup" aria-label="Choices">
           {(engagement.options ?? []).map((opt, index) => {
-            const count = Number(engagement.optionCounts?.[opt.id] ?? 0);
+            const count = Number(effOptionCounts[opt.id] ?? 0);
             const pct = Math.round((count / total) * 100);
             const selected = hasAnswered
               ? engagement.myOptionId === opt.id
@@ -691,7 +1150,7 @@ function EngagementCard({
           ) : null}
           {resultsHint ? <p className="engage-hint">{resultsHint}</p> : null}
         </div>
-      ) : (
+      ) : isFreeTextEngagement(engagement.type) ? (
         <div className="engage-open space-y-3">
           {canAnswer ? (
             <form
@@ -705,7 +1164,7 @@ function EngagementCard({
                   value={openText}
                   onChange={(e) => setOpenText(e.target.value)}
                   maxLength={60}
-                  placeholder="Type a short answer…"
+                  placeholder={freeTextPlaceholder}
                   disabled={submitting}
                   autoComplete="off"
                 />
@@ -732,33 +1191,55 @@ function EngagementCard({
 
           {showTallies ? (
             sortedPhrases.length > 0 ? (
-              <div className="engage-results">
-                <p className="engage-results-label">Word cloud</p>
-                <div className="engage-cloud" role="list">
-                  {sortedPhrases.map((p, i) => {
-                    const rank = p.count / maxPhraseCount;
-                    const weight = Math.min(1.25, 0.92 + rank * 0.45);
-                    return (
+              engagement.type === "word_cloud" ? (
+                <div className="engage-results">
+                  <p className="engage-results-label">Word cloud</p>
+                  <div
+                    className="engage-cloud-scatter"
+                    role="list"
+                    aria-label="Word cloud"
+                  >
+                    {cloudItems.map((item) => (
                       <span
-                        key={p.text}
+                        key={item.text}
                         role="listitem"
                         className={[
-                          "engage-chip",
-                          i === 0 ? "engage-chip-top" : "",
-                          rank >= 0.6 ? "engage-chip-strong" : "",
+                          "engage-cloud-word",
+                          item.weight === "bold"
+                            ? "engage-cloud-word-bold"
+                            : item.weight === "semibold"
+                              ? "engage-cloud-word-strong"
+                              : "",
                         ]
                           .filter(Boolean)
                           .join(" ")}
-                        style={{ fontSize: `${weight}rem` }}
-                        title={`${p.count} response${p.count === 1 ? "" : "s"}`}
+                        style={{
+                          left: `${item.x}%`,
+                          top: `${item.y}%`,
+                          fontSize: `${item.fontSize}rem`,
+                        }}
+                        title={`${item.count} response${item.count === 1 ? "" : "s"}`}
                       >
-                        <span className="engage-chip-text">{p.text}</span>
-                        <span className="engage-chip-count">{p.count}</span>
+                        {item.text}
                       </span>
-                    );
-                  })}
+                    ))}
+                  </div>
                 </div>
-              </div>
+              ) : (
+                <div className="engage-results">
+                  <p className="engage-results-label">Answers</p>
+                  <ul className="engage-answer-feed" role="list">
+                    {sortedPhrases.map((p) => (
+                      <li key={p.text} className="engage-answer-row">
+                        <p className="engage-answer-text">{p.text}</p>
+                        {p.count > 1 ? (
+                          <span className="engage-answer-count">{p.count}</span>
+                        ) : null}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )
             ) : (
               <p className="engage-hint">Waiting for answers…</p>
             )
@@ -766,7 +1247,7 @@ function EngagementCard({
             <p className="engage-hint">{resultsHint}</p>
           ) : null}
         </div>
-      )}
+      ) : null}
     </article>
   );
 }

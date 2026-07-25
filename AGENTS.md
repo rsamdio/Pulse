@@ -23,18 +23,22 @@ Production URL: `https://pulse.rsamdio.org`
 - Roles: `admins/{uid}` (super admin) · `organizers/{uid}` · attendees; first signed-in user bootstraps as admin+organizer
 - Callables use `roomId` (e.g. `createRoom`, `listAccessibleRooms`, `getRoomAccess`, `deleteRoom`); `promoteUser`/`demoteUser`/`listAdminDashboard` are admin-only
 - Admin UI: `/admin` (noindex) — organizers, all rooms, delete; room Ask/Engage via Open/Manage (admin has organizer powers on every room)
-- Room tabs: **Ask** (Q&A board) · **Engage** (organizer MCQ / open-text; `engagements`, `engagementResponses`, RTDB `rooms/{slug}/engagements`)
+- Room tabs: **Ask** (Q&A board) · **Engage** (MCQ / word cloud / open text; drafts queue with `sortOrder`; timers + auto-advance optional)
+- **Present** (noindex): `/rooms/[roomId]/present` — audience-safe projection; share this window only. No Peek/manage chrome
+- Engage lifecycle: Reveal ≠ Close; `resultsRevealed`; Hide until closed redacts public tallies; host Peek via `rooms/{slug}/private/engagementResults`
+- Engage private RTDB: `rooms/{slug}/private` is a **sibling** of `engagements` (never nest under it — RTDB read rules cascade). Holds Peek tallies + `draftQueue`. Readable by room `organizerId` or `platformAdmins/{uid}`
+- Engage control: Firestore `engageControl/{roomId}` mirrored to RTDB `rooms/{slug}/engageControl` (`phase`: idle|live|grace|held). Expiry: host/Present `setTimeout` + Cloud Tasks backstop (no Cloud Scheduler)
 
 ## Key paths
 
 | Area | Location |
 |---|---|
-| App routes | `src/app/` (`/`, `/join`, `/rooms`, `/admin`, `/terms`, `/privacy`) |
-| UI components | `src/components/` (`EngagementPane`, `ManageEngagements`, `ManageMembers`, …) |
+| App routes | `src/app/` (`/`, `/join`, `/rooms`, `/admin`, `/rooms/[id]/present`, `/terms`, `/privacy`) |
+| UI components | `src/components/` (`EngagementPane`, `ManageEngagements`, `PresentClient`, `ManageMembers`, …) |
 | Client API | `src/lib/api.ts` |
 | Types | `src/lib/types.ts` |
 | Live room hook | `src/lib/hooks/useRoom.ts` |
-| Engage hook | `src/lib/hooks/useEngagements.ts` |
+| Engage hooks | `useEngagements`, `useEngageControl`, `usePresentRoom`, `useEngagementExpiry` |
 | Functions | `functions/src/index.ts`, `mirror.ts`, `logic.ts` |
 | Rules | `firestore.rules`, `database.rules.json` |
 

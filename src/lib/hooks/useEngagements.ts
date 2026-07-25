@@ -3,24 +3,63 @@
 import { useEffect, useState } from "react";
 import { onValue, ref, type Unsubscribe } from "firebase/database";
 import { getRtdb } from "@/lib/firebase/client";
-import type { EngagementRtdb, EngagementView } from "@/lib/types";
+import type {
+  DraftQueueEntry,
+  EngagementRtdb,
+  EngagementView,
+  PrivateEngagementResult,
+} from "@/lib/types";
 import type { RoomListenPhase } from "@/lib/hooks/useRoom";
+
+function parseEngagement(id: string, e: EngagementRtdb): EngagementView {
+  return {
+    id,
+    ...e,
+    responseCount: Number(e.responseCount ?? 0),
+    resultsVisibility: e.resultsVisibility ?? "live",
+    resultsRevealed: Boolean(e.resultsRevealed),
+    revision: Number(e.revision ?? 0),
+    sortOrder: Number(e.sortOrder ?? e.createdAt ?? 0),
+    durationSec: e.durationSec ?? null,
+    autoAdvance: Boolean(e.autoAdvance),
+    liveEndsAt: e.liveEndsAt ?? null,
+    liveStartedAt: e.liveStartedAt ?? null,
+    options: e.options ?? [],
+    optionCounts: e.optionCounts ?? {},
+    phrases: e.phrases ?? [],
+  };
+}
 
 /**
  * Live engagements from RTDB + the current user's responses.
+ *
+ * When `includePrivateResults` is true (organizer Engage only) this also
+ * subscribes to the room's private Peek tallies and draft queue. Private read
+ * errors are soft (cleared, not fatal) so attendees / non-organizers are safe.
  */
 export function useEngagements(
   roomId: string | undefined,
   uid: string | undefined,
   phase: RoomListenPhase = "allowed",
+  opts?: { includePrivateResults?: boolean },
 ) {
+  const includePrivateResults = opts?.includePrivateResults ?? false;
   const [engagements, setEngagements] = useState<EngagementView[]>([]);
+  const [privateResults, setPrivateResults] = useState<
+    Record<string, PrivateEngagementResult>
+  >({});
+  const [draftQueue, setDraftQueue] = useState<Record<
+    string,
+    DraftQueueEntry
+  > | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!roomId || !uid || phase === "denied") {
       setEngagements([]);
+      setPrivateResults({});
+      setDraftQueue(null);
       setLoading(phase === "pending");
       setError(null);
       return;
@@ -77,15 +116,7 @@ export function useEngagements(
           engagementMap = {};
           if (val) {
             for (const [id, e] of Object.entries(val)) {
-              engagementMap[id] = {
-                id,
-                ...e,
-                responseCount: Number(e.responseCount ?? 0),
-                resultsVisibility: e.resultsVisibility ?? "live",
-                options: e.options ?? [],
-                optionCounts: e.optionCounts ?? {},
-                phrases: e.phrases ?? [],
-              };
+              engagementMap[id] = parseEngagement(id, e);
             }
           }
           engagementsReady = true;
@@ -111,12 +142,44 @@ export function useEngagements(
       ),
     );
 
+    if (includePrivateResults) {
+      unsubs.push(
+        onValue(
+          ref(db, `rooms/${roomId}/private/engagementResults`),
+          (snap) => {
+            const val = snap.val() as Record<
+              string,
+              PrivateEngagementResult
+            > | null;
+            setPrivateResults(val ?? {});
+          },
+          () => {
+            // Non-organizer or race before mirror; Peek simply unavailable.
+            setPrivateResults({});
+          },
+        ),
+      );
+
+      unsubs.push(
+        onValue(
+          ref(db, `rooms/${roomId}/private/draftQueue`),
+          (snap) => {
+            const val = snap.val() as Record<string, DraftQueueEntry> | null;
+            setDraftQueue(val);
+          },
+          () => {
+            setDraftQueue(null);
+          },
+        ),
+      );
+    }
+
     return () => {
       for (const u of unsubs) u();
     };
-  }, [roomId, uid, phase]);
+  }, [roomId, uid, phase, includePrivateResults]);
 
   const live = engagements.find((e) => e.status === "live") ?? null;
 
-  return { engagements, live, loading, error };
+  return { engagements, live, loading, error, privateResults, draftQueue };
 }

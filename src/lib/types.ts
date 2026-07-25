@@ -103,9 +103,12 @@ export interface AdminRoomSummary {
   voteTotal: number;
 }
 
-export type EngagementType = "mcq" | "open";
+export type EngagementType = "mcq" | "word_cloud" | "open_text";
 export type EngagementStatus = "draft" | "live" | "closed";
 export type EngagementResultsVisibility = "live" | "after_close";
+
+/** Engage control state machine phase (mirrored to public RTDB). */
+export type EngagePhase = "idle" | "live" | "grace" | "held";
 
 export interface EngagementOption {
   id: string;
@@ -118,6 +121,13 @@ export interface EngagementRtdb {
   prompt: string;
   status: EngagementStatus;
   resultsVisibility?: EngagementResultsVisibility;
+  resultsRevealed?: boolean;
+  revision?: number;
+  sortOrder?: number;
+  durationSec?: number | null;
+  autoAdvance?: boolean;
+  liveEndsAt?: number | null;
+  liveStartedAt?: number | null;
   options?: EngagementOption[];
   optionCounts?: Record<string, number>;
   phrases?: { text: string; count: number }[];
@@ -140,6 +150,13 @@ export interface EngagementDoc {
   prompt: string;
   status: EngagementStatus;
   resultsVisibility: EngagementResultsVisibility;
+  resultsRevealed?: boolean;
+  revision?: number;
+  sortOrder?: number;
+  durationSec?: number | null;
+  autoAdvance?: boolean;
+  liveEndsAt?: number | null;
+  liveStartedAt?: number | null;
   options: EngagementOption[];
   optionCounts: Record<string, number>;
   phrases: { text: string; count: number }[];
@@ -147,6 +164,31 @@ export interface EngagementDoc {
   createdAt: number;
   closedAt: number | null;
   createdBy: string;
+}
+
+/** RTDB `rooms/{slug}/engageControl` (public; drives Present + host grace UI). */
+export interface EngageControlRtdb {
+  phase: EngagePhase;
+  advanceAt: number | null;
+  generation: number;
+  activeEngagementId: string | null;
+  reservedNextId: string | null;
+}
+
+/** RTDB `rooms/{slug}/private/draftQueue/{id}` (organizer + admin only). */
+export interface DraftQueueEntry {
+  prompt: string;
+  type: EngagementType;
+  sortOrder: number;
+  durationSec?: number | null;
+  autoAdvance?: boolean;
+  resultsVisibility?: EngagementResultsVisibility;
+}
+
+/** Private Peek tallies from RTDB `rooms/{slug}/private/engagementResults/{id}`. */
+export interface PrivateEngagementResult {
+  optionCounts?: Record<string, number>;
+  phrases?: { text: string; count: number }[];
 }
 
 export interface EngagementExportRow extends EngagementDoc {

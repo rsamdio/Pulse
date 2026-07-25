@@ -5,16 +5,25 @@ import {
   assertEngagementType,
   assertMcqOptions,
   assertOpenResponse,
+  assertDurationSec,
+  assertAutoAdvance,
   canAccessRoom,
+  engagementSortOrder,
+  evaluateExpireGuards,
   isValidJoinCodeShape,
+  nextDraftId,
   normalizeEmail,
   normalizeOpenPhrase,
   normalizeSlug,
   roleFromDocs,
   roleFromOrganizerDoc,
   sanitizeCsvCell,
+  shouldPublicTallies,
+  shouldWritePrivateTallies,
   topPhrasesFromMap,
   assertResultsVisibility,
+  MIN_DURATION_SEC,
+  MAX_DURATION_SEC,
 } from "../src/logic";
 
 describe("normalizeEmail", () => {
@@ -83,6 +92,9 @@ describe("sanitizeCsvCell", () => {
 describe("engagement fields", () => {
   it("validates mcq options and open responses", () => {
     expect(assertEngagementType("mcq")).toBe("mcq");
+    expect(assertEngagementType("word_cloud")).toBe("word_cloud");
+    expect(assertEngagementType("open_text")).toBe("open_text");
+    expect(() => assertEngagementType("open")).toThrow();
     expect(() => assertEngagementType("quiz")).toThrow();
     expect(assertMcqOptions(["Yes", "No"])).toEqual([
       { id: "opt1", label: "Yes" },
@@ -109,6 +121,194 @@ describe("engagement fields", () => {
     expect(() => assertResultsVisibility("never")).toThrow();
   });
 });
+
+describe("engagementSortOrder", () => {
+  it("prefers sortOrder then createdAt", () => {
+    expect(engagementSortOrder({ sortOrder: 42, createdAt: 1 })).toBe(42);
+    expect(engagementSortOrder({ createdAt: 99 })).toBe(99);
+    expect(engagementSortOrder({})).toBe(0);
+  });
+});
+
+describe("nextDraftId", () => {
+  it("returns null for empty queue", () => {
+    expect(nextDraftId([])).toBeNull();
+  });
+
+  it("orders by sortOrder then createdAt then id", () => {
+    expect(
+      nextDraftId([
+        { id: "b", sortOrder: 2, createdAt: 1 },
+        { id: "a", sortOrder: 1, createdAt: 5 },
+        { id: "c", sortOrder: 1, createdAt: 3 },
+      ]),
+    ).toBe("c");
+    expect(
+      nextDraftId([
+        { id: "z", sortOrder: 1, createdAt: 1 },
+        { id: "a", sortOrder: 1, createdAt: 1 },
+      ]),
+    ).toBe("a");
+  });
+});
+
+describe("assertDurationSec", () => {
+  it("treats empty as untimed", () => {
+    expect(assertDurationSec(null)).toBeNull();
+    expect(assertDurationSec(undefined)).toBeNull();
+    expect(assertDurationSec("")).toBeNull();
+  });
+
+  it("accepts integers in range", () => {
+    expect(assertDurationSec(MIN_DURATION_SEC)).toBe(MIN_DURATION_SEC);
+    expect(assertDurationSec(60)).toBe(60);
+    expect(assertDurationSec(MAX_DURATION_SEC)).toBe(MAX_DURATION_SEC);
+  });
+
+  it("rejects out of range or non-integers", () => {
+    expect(() => assertDurationSec(9)).toThrow();
+    expect(() => assertDurationSec(3601)).toThrow();
+    expect(() => assertDurationSec(30.5)).toThrow();
+  });
+});
+
+describe("assertAutoAdvance", () => {
+  it("forces false when untimed", () => {
+    expect(assertAutoAdvance(true, null)).toBe(false);
+    expect(assertAutoAdvance(true, 60)).toBe(true);
+    expect(assertAutoAdvance(false, 60)).toBe(false);
+  });
+});
+
+describe("shouldPublicTallies", () => {
+  it("shows public tallies for live visibility or revealed/closed", () => {
+    expect(shouldPublicTallies("live", "live", false)).toBe(true);
+    expect(shouldPublicTallies("after_close", "live", true)).toBe(true);
+    expect(shouldPublicTallies("after_close", "closed", false)).toBe(true);
+    expect(shouldPublicTallies("after_close", "live", false)).toBe(false);
+  });
+});
+
+describe("shouldWritePrivateTallies", () => {
+  it("writes private Peek only for hidden live after_close", () => {
+    expect(shouldWritePrivateTallies("live", "live", false)).toBe(false);
+    expect(shouldWritePrivateTallies("after_close", "live", false)).toBe(true);
+    expect(shouldWritePrivateTallies("after_close", "live", true)).toBe(false);
+    expect(shouldWritePrivateTallies("after_close", "closed", false)).toBe(
+      false,
+    );
+    expect(shouldWritePrivateTallies("live", "closed", false)).toBe(false);
+  });
+});
+
+describe("evaluateExpireGuards", () => {
+  const base = {
+    activeEngagementId: "eng1",
+    fromEngagementId: undefined as string | undefined,
+    engStatus: "live",
+    liveEndsAt: 1_000_000 as number | null,
+    expectedLiveEndsAt: 1_000_000 as number | null | undefined,
+    now: 1_000_000,
+    controlGeneration: 3,
+    expectedGeneration: undefined as number | undefined,
+  };
+
+  it("denies untimed live with any expected token (High fix)", () => {
+    expect(
+      evaluateExpireGuards({
+        ...base,
+        liveEndsAt: null,
+        expectedLiveEndsAt: 1,
+      }),
+    ).toEqual({ result: "noop", reason: "untimed" });
+  });
+
+  it("noops on token mismatch", () => {
+    expect(
+      evaluateExpireGuards({
+        ...base,
+        expectedLiveEndsAt: 999,
+      }),
+    ).toEqual({ result: "noop", reason: "token_mismatch" });
+  });
+
+  it("noops when too early", () => {
+    expect(
+      evaluateExpireGuards({
+        ...base,
+        now: 999_999,
+      }),
+    ).toEqual({ result: "noop", reason: "too_early" });
+  });
+
+  it("proceeds when due and token matches", () => {
+    expect(evaluateExpireGuards(base)).toEqual({
+      result: "proceed",
+      engagementId: "eng1",
+    });
+  });
+
+  it("noops when expected is missing or NaN", () => {
+    expect(
+      evaluateExpireGuards({ ...base, expectedLiveEndsAt: null }),
+    ).toEqual({ result: "noop", reason: "missing_expected" });
+    expect(
+      evaluateExpireGuards({ ...base, expectedLiveEndsAt: Number.NaN }),
+    ).toEqual({ result: "noop", reason: "missing_expected" });
+  });
+
+  it("noops when not live", () => {
+    expect(
+      evaluateExpireGuards({ ...base, engStatus: "closed" }),
+    ).toEqual({ result: "noop", reason: "not_live" });
+    expect(evaluateExpireGuards({ ...base, engStatus: null })).toEqual({
+      result: "noop",
+      reason: "not_live",
+    });
+  });
+
+  it("noops on generation mismatch when provided; allows omit", () => {
+    expect(
+      evaluateExpireGuards({
+        ...base,
+        expectedGeneration: 2,
+      }),
+    ).toEqual({ result: "noop", reason: "generation_mismatch" });
+    expect(
+      evaluateExpireGuards({
+        ...base,
+        expectedGeneration: undefined,
+      }),
+    ).toEqual({ result: "proceed", engagementId: "eng1" });
+  });
+
+  it("noops when fromId differs from activeId", () => {
+    expect(
+      evaluateExpireGuards({
+        ...base,
+        fromEngagementId: "other",
+      }),
+    ).toEqual({ result: "noop", reason: "id_mismatch" });
+  });
+
+  it("prefers control activeId and falls back to fromId", () => {
+    expect(
+      evaluateExpireGuards({
+        ...base,
+        activeEngagementId: null,
+        fromEngagementId: "from-only",
+      }),
+    ).toEqual({ result: "proceed", engagementId: "from-only" });
+    expect(
+      evaluateExpireGuards({
+        ...base,
+        activeEngagementId: null,
+        fromEngagementId: undefined,
+      }),
+    ).toEqual({ result: "noop", reason: "no_active" });
+  });
+});
+
 
 describe("canAccessRoom", () => {
   it("allows public for anyone", () => {

@@ -12,6 +12,7 @@ import type {
   EngagementExportRow,
   EngagementResultsVisibility,
   EngagementType,
+  EngagePhase,
   RoomDoc,
   RoomMemberRow,
   QuestionView,
@@ -132,6 +133,8 @@ export const api = {
       prompt: string;
       options?: string[];
       resultsVisibility?: EngagementResultsVisibility;
+      durationSec?: number | null;
+      autoAdvance?: boolean;
       startLive?: boolean;
     },
     { engagementId: string; status: string }
@@ -143,6 +146,8 @@ export const api = {
       prompt?: string;
       options?: string[];
       resultsVisibility?: EngagementResultsVisibility;
+      durationSec?: number | null;
+      autoAdvance?: boolean;
     },
     { ok: true }
   >("updateEngagement"),
@@ -154,6 +159,42 @@ export const api = {
     { roomId: string; engagementId: string },
     { ok: true; alreadyClosed?: boolean }
   >("closeEngagement"),
+  revealEngagementResults: call<
+    { roomId: string; engagementId: string },
+    { ok: true; alreadyRevealed?: boolean }
+  >("revealEngagementResults"),
+  swapEngagementOrder: call<
+    {
+      roomId: string;
+      aId: string;
+      bId: string;
+      aOrder: number;
+      bOrder: number;
+    },
+    { ok: true }
+  >("swapEngagementOrder"),
+  advanceEngagement: call<
+    {
+      roomId: string;
+      fromEngagementId?: string;
+      expectedLiveEndsAt?: number | null;
+      expectedGeneration?: number;
+      completeGrace?: boolean;
+    },
+    {
+      ok: true;
+      alreadyAdvanced?: boolean;
+      phase?: EngagePhase;
+      activeEngagementId?: string | null;
+      generation?: number;
+      advanceAt?: number | null;
+      reservedNextId?: string | null;
+    }
+  >("advanceEngagement"),
+  cancelNextEngagement: call<
+    { roomId: string },
+    { ok: true; phase?: EngagePhase }
+  >("cancelNextEngagement"),
   deleteEngagement: call<
     { roomId: string; engagementId: string },
     { ok: true }

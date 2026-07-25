@@ -11,6 +11,8 @@ import { useAuth } from "@/contexts/AuthContext";
 import { api } from "@/lib/api";
 import { useRoom, type RoomListenPhase } from "@/lib/hooks/useRoom";
 import { useEngagements } from "@/lib/hooks/useEngagements";
+import { useEngageControl } from "@/lib/hooks/useEngageControl";
+import { useServerTimeOffset } from "@/lib/hooks/useServerTimeOffset";
 import { useDocumentTitle } from "@/lib/hooks/useDocumentTitle";
 import type { RoomDoc } from "@/lib/types";
 
@@ -68,17 +70,25 @@ function RoomView() {
     listenPhase,
   );
 
+  const isOrganizer = gate?.isOrganizer ?? false;
+
   const {
     engagements,
     live: liveEngagement,
     loading: engageLoading,
-  } = useEngagements(
+    privateResults,
+    draftQueue,
+  } = useEngagements(user?.uid ? roomId : undefined, user?.uid, listenPhase, {
+    includePrivateResults: isOrganizer,
+  });
+
+  const { control: engageControl } = useEngageControl(
     user?.uid ? roomId : undefined,
     user?.uid,
     listenPhase,
   );
+  const serverOffset = useServerTimeOffset();
 
-  const isOrganizer = gate?.isOrganizer ?? false;
   const questionsLocked =
     meta?.questionsLocked ?? gate?.room?.questionsLocked ?? false;
   const viewOnly = meta?.viewOnly ?? gate?.room?.viewOnly ?? false;
@@ -403,6 +413,10 @@ function RoomView() {
             isOrganizer={isOrganizer}
             canRespond={canRespondEngage}
             loading={engageLoading}
+            privateResults={privateResults}
+            draftQueue={draftQueue}
+            control={engageControl}
+            serverOffset={serverOffset}
           />
         </div>
       )}
