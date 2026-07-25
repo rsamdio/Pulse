@@ -6,7 +6,7 @@ This version has breaking changes — APIs, conventions, and file structure may 
 
 # Pulse — agent notes
 
-**Pulse** is a live room Q&A product owned by **Rotaract South Asia MDIO (RSAMDIO)**.  
+**Pulse** is a live room product for Q&A and audience engagement (Ask + Engage), owned by **Rotaract South Asia MDIO (RSAMDIO)**.  
 Production URL: `https://pulse.rsamdio.org`
 
 ## Stack
@@ -22,17 +22,19 @@ Production URL: `https://pulse.rsamdio.org`
 - Flags: `questionsLocked`, `viewOnly`, `anonymous`
 - Roles: `admins/{uid}` (super admin) · `organizers/{uid}` · attendees; first signed-in user bootstraps as admin+organizer
 - Callables use `roomId` (e.g. `createRoom`, `listAccessibleRooms`, `getRoomAccess`, `deleteRoom`); `promoteUser`/`demoteUser`/`listAdminDashboard` are admin-only
-- Admin UI: `/admin` (noindex) — organizers, all rooms, delete; room Q&A via Open/Manage (admin has organizer powers on every room)
+- Admin UI: `/admin` (noindex) — organizers, all rooms, delete; room Ask/Engage via Open/Manage (admin has organizer powers on every room)
+- Room tabs: **Ask** (Q&A board) · **Engage** (organizer MCQ / open-text; `engagements`, `engagementResponses`, RTDB `rooms/{slug}/engagements`)
 
 ## Key paths
 
 | Area | Location |
 |---|---|
 | App routes | `src/app/` (`/`, `/join`, `/rooms`, `/admin`, `/terms`, `/privacy`) |
-| UI components | `src/components/` |
+| UI components | `src/components/` (`EngagementPane`, `ManageEngagements`, `ManageMembers`, …) |
 | Client API | `src/lib/api.ts` |
 | Types | `src/lib/types.ts` |
 | Live room hook | `src/lib/hooks/useRoom.ts` |
+| Engage hook | `src/lib/hooks/useEngagements.ts` |
 | Functions | `functions/src/index.ts`, `mirror.ts`, `logic.ts` |
 | Rules | `firestore.rules`, `database.rules.json` |
 

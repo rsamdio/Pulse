@@ -9,6 +9,9 @@
         },
         "questions": {
           ".read": "auth != null && (root.child('access').child(auth.uid).child($roomId).val() === true || root.child('rooms').child($roomId).child('meta').child('accessMode').val() === 'public')"
+        },
+        "engagements": {
+          ".read": "auth != null && (root.child('access').child(auth.uid).child($roomId).val() === true || root.child('rooms').child($roomId).child('meta').child('accessMode').val() === 'public')"
         }
       }
     },
@@ -21,6 +24,11 @@
       }
     },
     "userVotes": {
+      "$uid": {
+        ".read": "auth != null && auth.uid === $uid"
+      }
+    },
+    "userEngagementResponses": {
       "$uid": {
         ".read": "auth != null && auth.uid === $uid"
       }

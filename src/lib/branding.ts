@@ -6,10 +6,10 @@ export const SITE_URL = "https://pulse.rsamdio.org";
 
 export const TITLE_SUFFIX = `${SITE_NAME} · ${ORG_NAME}`;
 
-export const DEFAULT_TITLE = `${SITE_NAME} · Live Room Q&A | ${ORG_NAME}`;
+export const DEFAULT_TITLE = `${SITE_NAME} · Live rooms | ${ORG_NAME}`;
 
 export const DEFAULT_DESCRIPTION =
-  "Live rooms where the best questions rise to the top. By Rotaract South Asia MDIO.";
+  "Live rooms for Q&A, polls, and open prompts. Ask, upvote, and engage in real time. By Rotaract South Asia MDIO.";
 
 /** Browser tab / metadata title: `Segment | Pulse · Rotaract South Asia MDIO` */
 export function pageTitle(segment: string): string {

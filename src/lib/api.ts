@@ -8,7 +8,12 @@ import type {
   AccessMode,
   AdminPerson,
   AdminRoomSummary,
+  EngagementDoc,
+  EngagementExportRow,
+  EngagementResultsVisibility,
+  EngagementType,
   RoomDoc,
+  RoomMemberRow,
   QuestionView,
 } from "@/lib/types";
 
@@ -120,4 +125,61 @@ export const api = {
       admins: AdminPerson[];
     }
   >("listAdminDashboard"),
+  createEngagement: call<
+    {
+      roomId: string;
+      type: EngagementType;
+      prompt: string;
+      options?: string[];
+      resultsVisibility?: EngagementResultsVisibility;
+      startLive?: boolean;
+    },
+    { engagementId: string; status: string }
+  >("createEngagement"),
+  updateEngagement: call<
+    {
+      roomId: string;
+      engagementId: string;
+      prompt?: string;
+      options?: string[];
+      resultsVisibility?: EngagementResultsVisibility;
+    },
+    { ok: true }
+  >("updateEngagement"),
+  goLiveEngagement: call<
+    { roomId: string; engagementId: string },
+    { ok: true; alreadyLive?: boolean }
+  >("goLiveEngagement"),
+  closeEngagement: call<
+    { roomId: string; engagementId: string },
+    { ok: true; alreadyClosed?: boolean }
+  >("closeEngagement"),
+  deleteEngagement: call<
+    { roomId: string; engagementId: string },
+    { ok: true }
+  >("deleteEngagement"),
+  listEngagements: call<
+    { roomId: string },
+    { engagements: EngagementDoc[] }
+  >("listEngagements"),
+  exportEngagements: call<
+    { roomId: string; engagementId?: string },
+    { engagements: EngagementExportRow[] }
+  >("exportEngagements"),
+  respondToEngagement: call<
+    {
+      roomId: string;
+      engagementId: string;
+      optionId?: string;
+      text?: string;
+    },
+    { ok: true }
+  >("respondToEngagement"),
+  listRoomMembers: call<{ roomId: string }, { members: RoomMemberRow[] }>(
+    "listRoomMembers",
+  ),
+  removeRoomMember: call<
+    { roomId: string; memberUid: string },
+    { ok: true }
+  >("removeRoomMember"),
 };

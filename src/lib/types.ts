@@ -102,3 +102,70 @@ export interface AdminRoomSummary {
   memberCount: number;
   voteTotal: number;
 }
+
+export type EngagementType = "mcq" | "open";
+export type EngagementStatus = "draft" | "live" | "closed";
+export type EngagementResultsVisibility = "live" | "after_close";
+
+export interface EngagementOption {
+  id: string;
+  label: string;
+}
+
+/** RTDB `rooms/{slug}/engagements/{id}` (live/closed only; drafts are Firestore-only). */
+export interface EngagementRtdb {
+  type: EngagementType;
+  prompt: string;
+  status: EngagementStatus;
+  resultsVisibility?: EngagementResultsVisibility;
+  options?: EngagementOption[];
+  optionCounts?: Record<string, number>;
+  phrases?: { text: string; count: number }[];
+  responseCount: number;
+  createdAt: number;
+  closedAt?: number | null;
+  createdBy?: string;
+}
+
+export interface EngagementView extends EngagementRtdb {
+  id: string;
+  myOptionId?: string | null;
+  myText?: string | null;
+}
+
+/** Organizer list/export payload (includes drafts). */
+export interface EngagementDoc {
+  id: string;
+  type: EngagementType;
+  prompt: string;
+  status: EngagementStatus;
+  resultsVisibility: EngagementResultsVisibility;
+  options: EngagementOption[];
+  optionCounts: Record<string, number>;
+  phrases: { text: string; count: number }[];
+  responseCount: number;
+  createdAt: number;
+  closedAt: number | null;
+  createdBy: string;
+}
+
+export interface EngagementExportRow extends EngagementDoc {
+  responses: {
+    respondentLabel: string;
+    optionId: string | null;
+    text: string | null;
+    createdAt: number;
+    updatedAt: number;
+  }[];
+}
+
+export type RoomMemberVia = "allowlist" | "code" | "organizer" | "public";
+
+export interface RoomMemberRow {
+  uid: string;
+  displayName: string;
+  email: string;
+  via: RoomMemberVia;
+  joinedAt: number;
+  isOrganizer: boolean;
+}

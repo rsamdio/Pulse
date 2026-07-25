@@ -6,11 +6,15 @@ import { useParams, useRouter } from "next/navigation";
 import { RequireAuth } from "@/components/RequireAuth";
 import { QuestionCard } from "@/components/QuestionCard";
 import { AccessBadge } from "@/components/AccessBadge";
+import { EngagementPane } from "@/components/EngagementPane";
 import { useAuth } from "@/contexts/AuthContext";
 import { api } from "@/lib/api";
 import { useRoom, type RoomListenPhase } from "@/lib/hooks/useRoom";
+import { useEngagements } from "@/lib/hooks/useEngagements";
 import { useDocumentTitle } from "@/lib/hooks/useDocumentTitle";
 import type { RoomDoc } from "@/lib/types";
+
+type RoomTab = "ask" | "engage";
 
 function RoomView() {
   const params = useParams<{ roomId: string }>();
@@ -30,6 +34,7 @@ function RoomView() {
   const [submitSuccess, setSubmitSuccess] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [composeOpen, setComposeOpen] = useState(false);
+  const [tab, setTab] = useState<RoomTab>("ask");
 
   const checkAccess = useCallback(async () => {
     setGateError(null);
@@ -54,11 +59,20 @@ function RoomView() {
     return () => window.clearTimeout(id);
   }, [submitSuccess]);
 
-  // Overlap RTDB with access check. Phase remounts listeners after membership grant.
   const listenPhase: RoomListenPhase =
     gate === null ? "pending" : gate.allowed ? "allowed" : "denied";
 
   const { meta, questions, loading, error } = useRoom(
+    user?.uid ? roomId : undefined,
+    user?.uid,
+    listenPhase,
+  );
+
+  const {
+    engagements,
+    live: liveEngagement,
+    loading: engageLoading,
+  } = useEngagements(
     user?.uid ? roomId : undefined,
     user?.uid,
     listenPhase,
@@ -70,6 +84,7 @@ function RoomView() {
   const viewOnly = meta?.viewOnly ?? gate?.room?.viewOnly ?? false;
   const canCompose = isOrganizer || (!questionsLocked && !viewOnly);
   const canVote = isOrganizer || !viewOnly;
+  const canRespondEngage = isOrganizer || !viewOnly;
 
   const onSubmit = async (e: FormEvent) => {
     e.preventDefault();
@@ -150,7 +165,6 @@ function RoomView() {
     );
   }
 
-  // Paint when RTDB meta arrived in parallel, or after allowed + first snapshot.
   if (!meta && (gate === null || (gate.allowed && loading))) {
     return (
       <p className="mt-12 text-center text-sm text-[var(--ink-muted)]">
@@ -159,9 +173,11 @@ function RoomView() {
     );
   }
 
+  const showComposeDock = tab === "ask" && canCompose;
+
   return (
     <div
-      className={`mx-auto w-full max-w-3xl ${canCompose ? "pb-28" : "pb-6"}`}
+      className={`mx-auto w-full max-w-3xl ${showComposeDock ? "pb-28" : "pb-6"}`}
     >
       <header className="panel room-hero">
         <div className="mb-2 flex flex-wrap items-center gap-1.5">
@@ -172,21 +188,19 @@ function RoomView() {
           {questionsLocked ? <span className="badge">Locked</span> : null}
           {viewOnly ? <span className="badge">View only</span> : null}
         </div>
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div className="min-w-0 flex-1">
-            <h1 className="font-[family-name:var(--font-display)] text-2xl font-semibold leading-tight tracking-tight text-[var(--secondary)] sm:text-3xl">
-              {title}
-            </h1>
-            {roomDescription ? (
-              <p className="mt-2 text-sm leading-relaxed text-[var(--ink-soft)]">
-                {roomDescription}
-              </p>
-            ) : null}
-          </div>
+        <div className="min-w-0">
+          <h1 className="font-[family-name:var(--font-display)] text-2xl font-semibold leading-tight tracking-tight text-[var(--secondary)] sm:text-3xl">
+            {title}
+          </h1>
+          {roomDescription ? (
+            <p className="mt-2 text-sm leading-relaxed text-[var(--ink-soft)]">
+              {roomDescription}
+            </p>
+          ) : null}
           {isOrganizer ? (
             <Link
               href={`/rooms/${roomId}/manage`}
-              className="btn btn-secondary btn-sm shrink-0"
+              className="btn btn-secondary btn-sm mt-3"
             >
               Manage room
             </Link>
@@ -201,154 +215,197 @@ function RoomView() {
         </div>
       </header>
 
-      {!canCompose ? (
-        <p className="mt-3 rounded-xl border border-[var(--line)] bg-[var(--surface)] px-3 py-2 text-xs text-[var(--ink-soft)]">
-          {viewOnly
-            ? "View-only mode is on. You can watch the board update live."
-            : "New questions are locked. You can still upvote existing ones."}
-        </p>
-      ) : null}
-
-      {error ? (
-        <p className="mt-3 rounded-xl border border-[var(--danger-soft)] bg-[var(--danger-soft)] px-3 py-2 text-xs text-[var(--danger)]">
-          {error}
-        </p>
-      ) : null}
-
-      <div className="mt-6 mb-2 flex items-baseline justify-between gap-3">
-        <h2 className="font-[family-name:var(--font-display)] text-lg font-semibold text-[var(--secondary)] sm:text-xl">
-          Questions
-        </h2>
-      </div>
-
-      <div className="space-y-2.5">
-        {questions.length === 0 && !loading ? (
-          <div className="empty-board">
-            <p className="font-[family-name:var(--font-display)] text-lg">
-              No questions yet
-            </p>
-            <p className="mt-1 text-sm text-[var(--ink-soft)]">
-              Be the first to ask something worth answering.
-            </p>
-          </div>
-        ) : null}
-        {questions.map((q, index) => (
-          <QuestionCard
-            key={q.id}
-            question={q}
-            rank={index + 1}
-            anonymous={isAnonymous}
-            disabled={!canVote}
-            canModerate={isOrganizer}
-            onVote={onVote}
-            onDelete={onDelete}
-            onToggleAnswered={onToggleAnswered}
-          />
-        ))}
-      </div>
-
-      {canCompose ? (
-        <div className="compose-dock">
-          <div className="compose-dock-inner">
-            {submitSuccess ? (
-              <p className="compose-toast" role="status" aria-live="polite">
-                {submitSuccess}
-              </p>
+      <nav className="room-tabs" role="tablist" aria-label="Room sections">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={tab === "ask"}
+          className={`room-tab ${tab === "ask" ? "room-tab-active" : ""}`}
+          onClick={() => setTab("ask")}
+        >
+          <span className="room-tab-title">Ask</span>
+          <span className="room-tab-hint">Q&A board</span>
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={tab === "engage"}
+          className={`room-tab ${tab === "engage" ? "room-tab-active" : ""}`}
+          onClick={() => setTab("engage")}
+        >
+          <span className="room-tab-title">
+            Engage
+            {liveEngagement ? (
+              <span className="room-tab-dot" aria-label="Live engagement" />
             ) : null}
-            {!composeOpen ? (
-              <form
-                className="compose-bar"
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  if (question.trim()) {
-                    void onSubmit(e);
-                  } else {
-                    setComposeOpen(true);
-                  }
-                }}
-              >
-                <input
-                  value={question}
-                  onChange={(e) => setQuestion(e.target.value)}
-                  onFocus={() => setComposeOpen(true)}
-                  maxLength={200}
-                  placeholder="Ask a question…"
-                  aria-label="Ask a question"
-                />
-                <button
-                  type="button"
-                  className="btn btn-primary btn-sm shrink-0"
-                  onClick={() => setComposeOpen(true)}
-                >
-                  Ask
-                </button>
-              </form>
-            ) : (
-              <form
-                onSubmit={(e) => void onSubmit(e)}
-                className="compose-panel space-y-2.5"
-              >
-                <div className="flex items-center justify-between gap-2">
-                  <p className="text-xs font-semibold text-[var(--ink)]">
-                    {isAnonymous
-                      ? "Ask anonymously"
-                      : `Ask as ${profile?.displayName ?? "you"}`}
-                  </p>
-                  <button
-                    type="button"
-                    className="text-[0.7rem] font-medium text-[var(--ink-muted)] underline"
-                    onClick={() => setComposeOpen(false)}
-                  >
-                    Close
-                  </button>
-                </div>
-                <label className="block space-y-1">
-                  <span className="label-caps">Question</span>
-                  <input
-                    className="field"
-                    value={question}
-                    onChange={(e) => setQuestion(e.target.value)}
-                    maxLength={200}
-                    placeholder="What do you want answered?"
-                    required
-                    autoFocus
-                  />
-                </label>
-                <label className="block space-y-1">
-                  <span className="label-caps">
-                    Description{" "}
-                    <span className="normal-case tracking-normal text-[var(--ink-muted)]">
-                      optional
-                    </span>
-                  </span>
-                  <textarea
-                    className="field min-h-[4rem]"
-                    value={questionDescription}
-                    onChange={(e) => setQuestionDescription(e.target.value)}
-                    maxLength={1000}
-                    placeholder="Context or why it matters…"
-                  />
-                </label>
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <span className="text-[0.65rem] text-[var(--ink-muted)]">
-                    {question.length}/200 · {questionDescription.length}/1000
-                  </span>
-                  <button
-                    type="submit"
-                    className="btn btn-primary btn-sm"
-                    disabled={submitting || !question.trim()}
-                  >
-                    {submitting ? "Posting…" : "Submit"}
-                  </button>
-                </div>
-                {submitError ? (
-                  <p className="text-xs text-[var(--danger)]">{submitError}</p>
-                ) : null}
-              </form>
-            )}
+          </span>
+          <span className="room-tab-hint">Polls & prompts</span>
+        </button>
+      </nav>
+
+      {tab === "ask" ? (
+        <>
+          {!canCompose ? (
+            <p className="mt-3 rounded-xl border border-[var(--line)] bg-[var(--surface)] px-3 py-2 text-xs text-[var(--ink-soft)]">
+              {viewOnly
+                ? "View-only mode is on. You can watch the board update live."
+                : "New questions are locked. You can still upvote existing ones."}
+            </p>
+          ) : null}
+
+          {error ? (
+            <p className="mt-3 rounded-xl border border-[var(--danger-soft)] bg-[var(--danger-soft)] px-3 py-2 text-xs text-[var(--danger)]">
+              {error}
+            </p>
+          ) : null}
+
+          <div className="mt-6 mb-2 flex items-baseline justify-between gap-3">
+            <h2 className="font-[family-name:var(--font-display)] text-lg font-semibold text-[var(--secondary)] sm:text-xl">
+              Questions
+            </h2>
           </div>
+
+          <div className="space-y-2.5">
+            {questions.length === 0 && !loading ? (
+              <div className="empty-board">
+                <p className="font-[family-name:var(--font-display)] text-lg">
+                  No questions yet
+                </p>
+                <p className="mt-1 text-sm text-[var(--ink-soft)]">
+                  Be the first to ask something worth answering.
+                </p>
+              </div>
+            ) : null}
+            {questions.map((q, index) => (
+              <QuestionCard
+                key={q.id}
+                question={q}
+                rank={index + 1}
+                anonymous={isAnonymous}
+                disabled={!canVote}
+                canModerate={isOrganizer}
+                onVote={onVote}
+                onDelete={onDelete}
+                onToggleAnswered={onToggleAnswered}
+              />
+            ))}
+          </div>
+
+          {showComposeDock ? (
+            <div className="compose-dock">
+              <div className="compose-dock-inner">
+                {submitSuccess ? (
+                  <p className="compose-toast" role="status" aria-live="polite">
+                    {submitSuccess}
+                  </p>
+                ) : null}
+                {!composeOpen ? (
+                  <form
+                    className="compose-bar"
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      if (question.trim()) {
+                        void onSubmit(e);
+                      } else {
+                        setComposeOpen(true);
+                      }
+                    }}
+                  >
+                    <input
+                      value={question}
+                      onChange={(e) => setQuestion(e.target.value)}
+                      onFocus={() => setComposeOpen(true)}
+                      maxLength={200}
+                      placeholder="Ask a question…"
+                      aria-label="Ask a question"
+                    />
+                    <button
+                      type="button"
+                      className="btn btn-primary btn-sm shrink-0"
+                      onClick={() => setComposeOpen(true)}
+                    >
+                      Ask
+                    </button>
+                  </form>
+                ) : (
+                  <form
+                    onSubmit={(e) => void onSubmit(e)}
+                    className="compose-panel space-y-2.5"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="text-xs font-semibold text-[var(--ink)]">
+                        {isAnonymous
+                          ? "Ask anonymously"
+                          : `Ask as ${profile?.displayName ?? "you"}`}
+                      </p>
+                      <button
+                        type="button"
+                        className="text-[0.7rem] font-medium text-[var(--ink-muted)] underline"
+                        onClick={() => setComposeOpen(false)}
+                      >
+                        Close
+                      </button>
+                    </div>
+                    <label className="block space-y-1">
+                      <span className="label-caps">Question</span>
+                      <input
+                        className="field"
+                        value={question}
+                        onChange={(e) => setQuestion(e.target.value)}
+                        maxLength={200}
+                        placeholder="What do you want answered?"
+                        required
+                        autoFocus
+                      />
+                    </label>
+                    <label className="block space-y-1">
+                      <span className="label-caps">
+                        Description{" "}
+                        <span className="normal-case tracking-normal text-[var(--ink-muted)]">
+                          optional
+                        </span>
+                      </span>
+                      <textarea
+                        className="field min-h-[4rem]"
+                        value={questionDescription}
+                        onChange={(e) => setQuestionDescription(e.target.value)}
+                        maxLength={1000}
+                        placeholder="Context or why it matters…"
+                      />
+                    </label>
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="text-[0.65rem] text-[var(--ink-muted)]">
+                        {question.length}/200 · {questionDescription.length}/1000
+                      </span>
+                      <button
+                        type="submit"
+                        className="btn btn-primary btn-sm"
+                        disabled={submitting || !question.trim()}
+                      >
+                        {submitting ? "Posting…" : "Submit"}
+                      </button>
+                    </div>
+                    {submitError ? (
+                      <p className="text-xs text-[var(--danger)]">{submitError}</p>
+                    ) : null}
+                  </form>
+                )}
+              </div>
+            </div>
+          ) : null}
+        </>
+      ) : (
+        <div className="mt-4">
+          <EngagementPane
+            roomId={roomId}
+            engagements={engagements}
+            live={liveEngagement}
+            isOrganizer={isOrganizer}
+            canRespond={canRespondEngage}
+            loading={engageLoading}
+          />
         </div>
-      ) : null}
+      )}
     </div>
   );
 }

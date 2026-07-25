@@ -186,6 +186,7 @@ export async function clearMirroredMemberAccess(
   try {
     await rtdb().ref(`access/${uid}/${roomId}`).remove();
     await rtdb().ref(`userVotes/${uid}/${roomId}`).remove();
+    await rtdb().ref(`userEngagementResponses/${uid}/${roomId}`).remove();
   } catch (error) {
     await recordMirrorFailure(
       "clearMemberAccess",
@@ -193,6 +194,82 @@ export async function clearMirroredMemberAccess(
       error,
     );
     // best-effort cleanup; don't fail the whole delete
+  }
+}
+
+export async function mirrorEngagement(
+  roomId: string,
+  engagementId: string,
+  payload: Record<string, unknown>,
+): Promise<void> {
+  try {
+    await rtdb()
+      .ref(`rooms/${roomId}/engagements/${engagementId}`)
+      .set(payload);
+  } catch (error) {
+    await recordMirrorFailure(
+      "engagement",
+      `${roomId}/${engagementId}`,
+      error,
+    );
+    throw error;
+  }
+}
+
+export async function removeMirroredEngagement(
+  roomId: string,
+  engagementId: string,
+): Promise<void> {
+  try {
+    await rtdb()
+      .ref(`rooms/${roomId}/engagements/${engagementId}`)
+      .remove();
+  } catch (error) {
+    await recordMirrorFailure(
+      "removeEngagement",
+      `${roomId}/${engagementId}`,
+      error,
+    );
+    throw error;
+  }
+}
+
+export async function mirrorUserEngagementResponse(
+  uid: string,
+  roomId: string,
+  engagementId: string,
+  response: { optionId?: string; text?: string },
+): Promise<void> {
+  try {
+    await rtdb()
+      .ref(`userEngagementResponses/${uid}/${roomId}/${engagementId}`)
+      .set(response);
+  } catch (error) {
+    await recordMirrorFailure(
+      "userEngagementResponse",
+      `${uid}/${roomId}/${engagementId}`,
+      error,
+    );
+    throw error;
+  }
+}
+
+export async function clearUserEngagementResponse(
+  uid: string,
+  roomId: string,
+  engagementId: string,
+): Promise<void> {
+  try {
+    await rtdb()
+      .ref(`userEngagementResponses/${uid}/${roomId}/${engagementId}`)
+      .remove();
+  } catch (error) {
+    await recordMirrorFailure(
+      "clearUserEngagementResponse",
+      `${uid}/${roomId}/${engagementId}`,
+      error,
+    );
+    throw error;
   }
 }
 

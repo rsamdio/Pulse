@@ -55,12 +55,12 @@ function HomeContent() {
           Pul<span className="text-[var(--primary-deep)]">se</span>
         </h1>
         <p className="mt-2 text-[0.68rem] font-bold uppercase tracking-[0.18em] text-[var(--primary)]">
-          Live room Q&A
+          Live rooms
         </p>
         <p className="mt-3 text-sm leading-relaxed text-[var(--ink-soft)]">
           {pendingRoom
             ? "Sign in to open the room you were invited to."
-            : "Live rooms for events and sessions. Organizers open a room, you sign in with Google, ask questions, and upvote so the best rise to the top in real time."}
+            : "Live rooms for events and sessions. Organizers open a room; you sign in with Google to ask and upvote questions, or answer polls and short prompts on Engage."}
         </p>
 
         {pendingRoom ? (

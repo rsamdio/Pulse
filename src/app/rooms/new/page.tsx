@@ -86,7 +86,8 @@ function NewRoomForm() {
             Create new room
           </h1>
           <p className="mt-1.5 text-sm text-[var(--ink-soft)]">
-            Configure details for your upcoming live Q&A session.
+            Configure details for your upcoming live session with Ask and
+            Engage.
           </p>
         </div>
         <Link href="/rooms" className="btn btn-ghost btn-sm" aria-label="Close">
@@ -106,7 +107,7 @@ function NewRoomForm() {
             onChange={(e) => onTitleChange(e.target.value)}
             required
             maxLength={120}
-            placeholder="e.g., Town hall Q&A"
+            placeholder="e.g., Town hall"
           />
         </label>
 

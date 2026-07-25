@@ -124,9 +124,9 @@ function AdminConsole() {
           Admin console
         </h1>
         <p className="mt-1 max-w-2xl text-sm text-[var(--ink-soft)]">
-          Promote organizers, review every room, and jump into live Q&A or
-          manage settings. Room-level questions and votes stay on each room
-          page.
+          Promote organizers, review every room, and jump into Open or Manage
+          for Q&A and Engage. Room-level questions, votes, and engagements stay
+          on each room page.
         </p>
       </div>
 

@@ -33,9 +33,10 @@ export default function PrivacyPage() {
       </p>
       <p>
         When you use Pulse we also process room titles and descriptions,
-        questions and optional descriptions, votes, invite lists, join codes,
-        and organizer settings. Technical logs may include timestamps and error
-        details needed to keep the service running.
+        questions and optional descriptions, votes, engagements and engagement
+        responses, invite lists, join codes, room membership, and organizer
+        settings. Technical logs may include timestamps and error details needed
+        to keep the service running.
       </p>
 
       <h2>Analytics</h2>

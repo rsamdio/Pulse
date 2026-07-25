@@ -6,6 +6,8 @@ import { useParams, useRouter } from "next/navigation";
 import { RequireAuth } from "@/components/RequireAuth";
 import { AccessBadge } from "@/components/AccessBadge";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { ManageEngagements } from "@/components/ManageEngagements";
+import { ManageMembers } from "@/components/ManageMembers";
 import { api } from "@/lib/api";
 import { useDocumentTitle } from "@/lib/hooks/useDocumentTitle";
 import type { AccessMode, RoomDoc } from "@/lib/types";
@@ -444,6 +446,12 @@ function ManageRoom() {
         </button>
       </section>
 
+      <ManageEngagements roomId={roomId} />
+
+      {room.accessMode !== "public" ? (
+        <ManageMembers roomId={roomId} accessMode={room.accessMode} />
+      ) : null}
+
       {(room.accessMode === "allowlist" || room.accessMode === "hybrid") && (
         <form onSubmit={(e) => void saveAllowlist(e)} className="panel space-y-3">
           <h2 className="font-[family-name:var(--font-display)] text-xl font-semibold">
@@ -466,8 +474,8 @@ function ManageRoom() {
           Delete room
         </h2>
         <p className="text-sm text-[var(--ink-soft)]">
-          Permanently removes this room, its questions, votes, invite list, and
-          entry code. This cannot be undone.
+          Permanently removes this room, its questions, votes, engagements,
+          invite list, and entry code. This cannot be undone.
         </p>
         <button
           type="button"

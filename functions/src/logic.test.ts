@@ -2,13 +2,19 @@ import { describe, expect, it } from "vitest";
 import {
   assertQuestionFields,
   assertSlug,
+  assertEngagementType,
+  assertMcqOptions,
+  assertOpenResponse,
   canAccessRoom,
   isValidJoinCodeShape,
   normalizeEmail,
+  normalizeOpenPhrase,
   normalizeSlug,
   roleFromDocs,
   roleFromOrganizerDoc,
   sanitizeCsvCell,
+  topPhrasesFromMap,
+  assertResultsVisibility,
 } from "../src/logic";
 
 describe("normalizeEmail", () => {
@@ -71,6 +77,36 @@ describe("sanitizeCsvCell", () => {
   it("neutralizes formula prefixes", () => {
     expect(sanitizeCsvCell("=1+1")).toBe("'=1+1");
     expect(sanitizeCsvCell("hello")).toBe("hello");
+  });
+});
+
+describe("engagement fields", () => {
+  it("validates mcq options and open responses", () => {
+    expect(assertEngagementType("mcq")).toBe("mcq");
+    expect(() => assertEngagementType("quiz")).toThrow();
+    expect(assertMcqOptions(["Yes", "No"])).toEqual([
+      { id: "opt1", label: "Yes" },
+      { id: "opt2", label: "No" },
+    ]);
+    expect(() => assertMcqOptions(["Only one"])).toThrow();
+    expect(assertOpenResponse("  Hello World  ")).toEqual({
+      text: "Hello World",
+      phrase: "hello world",
+    });
+    expect(normalizeOpenPhrase("  A   B ")).toBe("a b");
+    expect(
+      topPhrasesFromMap(
+        { hello: 2, world: 5 },
+        { hello: "Hello", world: "World" },
+        1,
+      ),
+    ).toEqual([{ text: "World", count: 5 }]);
+  });
+
+  it("defaults results visibility", () => {
+    expect(assertResultsVisibility(undefined)).toBe("live");
+    expect(assertResultsVisibility("after_close")).toBe("after_close");
+    expect(() => assertResultsVisibility("never")).toThrow();
   });
 });
 

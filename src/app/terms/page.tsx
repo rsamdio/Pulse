@@ -20,9 +20,9 @@ export default function TermsPage() {
   return (
     <LegalPage title="Terms of Service" updated="24 July 2026">
       <p>
-        Pulse is a live room Q&A product owned and operated by{" "}
-        <strong>Rotaract South Asia MDIO (RSAMDIO)</strong>. By signing in and
-        using Pulse, you agree to these terms and our{" "}
+        Pulse is a live room product for Q&A and audience engagement, owned and
+        operated by <strong>Rotaract South Asia MDIO (RSAMDIO)</strong>. By
+        signing in and using Pulse, you agree to these terms and our{" "}
         <Link href="/privacy">Privacy Policy</Link>.
       </p>
 
@@ -37,14 +37,14 @@ export default function TermsPage() {
       <h2>Rooms and content</h2>
       <p>
         Organizers create rooms and control access, moderation, and settings
-        such as view-only or anonymous mode. Questions, descriptions, and votes
-        you submit may be visible to others in that room. Organizers may remove
-        questions or delete rooms.
+        such as view-only or anonymous mode. Questions, descriptions, votes,
+        and Engage responses you submit may be visible to others in that room.
+        Organizers may remove questions, close engagements, or delete rooms.
       </p>
       <p>
         In anonymous rooms, display names on questions are hidden in the
         product UI. Pulse may still store account identifiers needed to run
-        voting, moderation, and abuse prevention.
+        voting, engagement responses, moderation, and abuse prevention.
       </p>
 
       <h2>Acceptable use</h2>

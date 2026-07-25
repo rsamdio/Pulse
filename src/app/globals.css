@@ -1053,3 +1053,430 @@ select {
 .legal-body p {
   margin: 0;
 }
+
+/* Room Ask | Engage tabs — clear section switch, not a muted pill */
+.room-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+
+.room-tab {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.15rem;
+  border: 1.5px solid var(--line-strong);
+  border-radius: 1rem;
+  background: var(--surface);
+  padding: 0.75rem 1rem;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color 140ms ease,
+    background 140ms ease,
+    box-shadow 140ms ease,
+    color 140ms ease;
+}
+
+.room-tab:hover {
+  border-color: var(--secondary);
+  background: var(--secondary-soft);
+}
+
+.room-tab-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-family: var(--font-display), Georgia, serif;
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: var(--ink-soft);
+  line-height: 1.2;
+}
+
+.room-tab-hint {
+  font-size: 0.72rem;
+  font-weight: 500;
+  color: var(--ink-muted);
+  line-height: 1.3;
+}
+
+.room-tab-active {
+  border-color: var(--secondary);
+  background: var(--secondary-soft);
+  box-shadow: inset 0 0 0 1px var(--secondary);
+}
+
+.room-tab-active .room-tab-title {
+  color: var(--secondary-deep);
+}
+
+.room-tab-active .room-tab-hint {
+  color: var(--secondary);
+}
+
+.room-tab-dot {
+  width: 0.45rem;
+  height: 0.45rem;
+  border-radius: 999px;
+  background: var(--primary);
+  box-shadow: 0 0 0 3px var(--primary-soft);
+}
+
+.engage-card {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  transition:
+    border-color 180ms ease,
+    background 180ms ease,
+    box-shadow 180ms ease;
+}
+
+.engage-card-live {
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--primary) 12%, transparent);
+}
+
+.engage-card-answered {
+  border-color: color-mix(in srgb, var(--ok) 32%, var(--line));
+  background: color-mix(in srgb, var(--ok-soft) 45%, var(--surface));
+}
+
+.engage-prompt {
+  font-family: var(--font-display), Georgia, serif;
+  font-size: 1.15rem;
+  font-weight: 600;
+  line-height: 1.3;
+  letter-spacing: -0.01em;
+  color: var(--ink);
+}
+
+@media (min-width: 640px) {
+  .engage-prompt {
+    font-size: 1.25rem;
+  }
+}
+
+.engage-meta-line {
+  font-size: 0.78rem;
+  color: var(--ink-muted);
+}
+
+.engage-hint {
+  margin: 0;
+  font-size: 0.75rem;
+  line-height: 1.4;
+  color: var(--ink-muted);
+}
+
+.engage-options {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+.engage-option {
+  display: block;
+  width: 100%;
+  min-height: 3rem;
+  text-align: left;
+  border: 1px solid var(--line);
+  border-radius: 0.95rem;
+  background: var(--surface);
+  padding: 0.8rem 0.9rem;
+  cursor: pointer;
+  transition:
+    border-color 160ms ease,
+    background 160ms ease,
+    opacity 160ms ease,
+    transform 120ms ease,
+    box-shadow 160ms ease;
+}
+
+.engage-option:hover:not(:disabled) {
+  border-color: var(--line-strong);
+  background: var(--surface-low);
+}
+
+.engage-option:active:not(:disabled) {
+  transform: scale(0.992);
+}
+
+.engage-option:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+.engage-option:disabled {
+  cursor: default;
+}
+
+.engage-option-pending {
+  opacity: 0.72;
+}
+
+.engage-mcq-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.65rem;
+  padding-top: 0.15rem;
+}
+
+.engage-mcq-submit {
+  min-height: 2.5rem;
+  margin-left: auto;
+}
+
+.engage-option-on {
+  border-color: var(--primary);
+  background: color-mix(in srgb, var(--primary-soft) 85%, var(--surface));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--primary) 28%, transparent);
+}
+
+.engage-option-muted {
+  opacity: 0.48;
+}
+
+.engage-option-locked {
+  cursor: default;
+}
+
+.engage-option-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.engage-option-main {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 0.65rem;
+}
+
+.engage-option-letter {
+  display: inline-flex;
+  width: 1.55rem;
+  height: 1.55rem;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--surface-low);
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--ink-soft);
+}
+
+.engage-option-on .engage-option-letter {
+  border-color: transparent;
+  background: var(--primary);
+  color: #fff;
+}
+
+.engage-option-label {
+  font-size: 0.95rem;
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--ink);
+}
+
+.engage-option-yours {
+  flex-shrink: 0;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--primary-deep);
+}
+
+.engage-option-meta {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: baseline;
+  gap: 0.4rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.engage-option-pct {
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.engage-option-count {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--ink-muted);
+}
+
+.engage-bar-track {
+  margin-top: 0.55rem;
+  height: 0.4rem;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--line) 85%, transparent);
+  overflow: hidden;
+}
+
+.engage-bar-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--primary) 0%, var(--primary-deep) 100%);
+  transition: width 280ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.engage-open-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+  align-items: stretch;
+}
+
+.engage-open-field {
+  position: relative;
+  display: block;
+  min-width: 12rem;
+  flex: 1 1 14rem;
+}
+
+.engage-open-input {
+  width: 100%;
+  padding-right: 2.75rem;
+  min-height: 2.75rem;
+}
+
+.engage-open-count {
+  position: absolute;
+  right: 0.75rem;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 0.7rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-muted);
+  pointer-events: none;
+}
+
+.engage-open-count-warn {
+  color: var(--primary-deep);
+}
+
+.engage-open-submit {
+  min-height: 2.75rem;
+  align-self: stretch;
+}
+
+.engage-open-locked {
+  border: 1px solid color-mix(in srgb, var(--ok) 28%, var(--line));
+  border-radius: 0.95rem;
+  background: color-mix(in srgb, var(--ok-soft) 55%, var(--surface));
+  padding: 0.85rem 1rem;
+}
+
+.engage-open-locked-label {
+  margin: 0 0 0.2rem;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ok);
+}
+
+.engage-open-locked-text {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--ink);
+}
+
+.engage-results {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  padding-top: 0.15rem;
+}
+
+.engage-results-label {
+  margin: 0;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink-muted);
+}
+
+.engage-cloud {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.engage-chip {
+  display: inline-flex;
+  max-width: 100%;
+  align-items: center;
+  gap: 0.35rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  padding: 0.4rem 0.75rem;
+  font-family: var(--font-body), system-ui, sans-serif;
+  font-weight: 600;
+  line-height: 1.25;
+  color: var(--ink);
+  word-break: break-word;
+  transition: border-color 160ms ease, background 160ms ease, transform 160ms ease;
+}
+
+.engage-chip-text {
+  min-width: 0;
+}
+
+.engage-chip-count {
+  flex-shrink: 0;
+  min-width: 1.15rem;
+  border-radius: 999px;
+  background: var(--surface-low);
+  padding: 0.05rem 0.35rem;
+  font-size: 0.68rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-muted);
+  text-align: center;
+}
+
+.engage-chip-strong {
+  border-color: color-mix(in srgb, var(--secondary) 22%, var(--line));
+  background: color-mix(in srgb, var(--secondary) 6%, var(--surface));
+}
+
+.engage-chip-top {
+  border-color: color-mix(in srgb, var(--primary) 30%, var(--line));
+  background: color-mix(in srgb, var(--primary-soft) 70%, var(--surface));
+}
+
+.engage-chip-top .engage-chip-count {
+  background: color-mix(in srgb, var(--primary) 14%, var(--surface));
+  color: var(--primary-deep);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .engage-card,
+  .engage-option,
+  .engage-bar-fill,
+  .engage-chip {
+    transition: none;
+  }
+
+  .engage-option:active:not(:disabled) {
+    transform: none;
+  }
+}

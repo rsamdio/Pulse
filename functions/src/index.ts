@@ -3,6 +3,11 @@ import { createHash, randomBytes, timingSafeEqual } from "crypto";
 import { onCall, HttpsError, type CallableRequest } from "firebase-functions/v2/https";
 import { setGlobalOptions } from "firebase-functions/v2";
 import {
+  assertEngagementPrompt,
+  assertEngagementType,
+  assertMcqOptions,
+  assertOpenResponse,
+  assertResultsVisibility,
   assertQuestionFields,
   assertRoomDescription,
   assertRoomTitle,
@@ -15,7 +20,11 @@ import {
   normalizeJoinCode,
   RATE_LIMIT_MS,
   roleFromDocs,
+  topPhrasesFromMap,
   type AccessMode,
+  type EngagementResultsVisibility,
+  type EngagementStatus,
+  type EngagementType,
   type UserRole,
 } from "./logic";
 import {
@@ -29,6 +38,10 @@ import {
   mirrorQuestionAnswered,
   removeMirroredRoom,
   clearMirroredMemberAccess,
+  mirrorEngagement,
+  removeMirroredEngagement,
+  mirrorUserEngagementResponse,
+  clearUserEngagementResponse,
 } from "./mirror";
 
 setGlobalOptions({ region: "asia-southeast1", maxInstances: 20 });
@@ -1152,6 +1165,81 @@ export const getAllowlist = onCall(async (request) => {
   };
 });
 
+export const listRoomMembers = onCall(async (request) => {
+  const { uid, email } = requireAuth(request);
+  const roomId = String(request.data?.roomId ?? "").trim();
+  if (!roomId) throw new HttpsError("invalid-argument", "roomId required");
+  await rateLimit(uid, "listRoomMembers");
+
+  const ctx = await loadAccessContext(roomId, uid, email);
+  if (!ctx.isOrganizer) {
+    throw new HttpsError("permission-denied", "Only the organizer can list members");
+  }
+
+  const snap = await db.collection(`roomMembers/${roomId}/members`).get();
+  const organizerId = String(ctx.room.organizerId ?? "");
+  const members = await Promise.all(
+    snap.docs.map(async (docSnap) => {
+      const data = docSnap.data();
+      const memberUid = docSnap.id;
+      const userSnap = await db.doc(`users/${memberUid}`).get();
+      const user = userSnap.data() ?? {};
+      const viaRaw = String(data.via ?? "code");
+      const via =
+        viaRaw === "allowlist" ||
+        viaRaw === "code" ||
+        viaRaw === "organizer" ||
+        viaRaw === "public"
+          ? viaRaw
+          : "code";
+      return {
+        uid: memberUid,
+        displayName: String(user.displayName ?? "").trim() || "Member",
+        email: String(user.email ?? "").trim().toLowerCase(),
+        via: via as "allowlist" | "code" | "organizer" | "public",
+        joinedAt: Number(data.joinedAt ?? 0),
+        isOrganizer: memberUid === organizerId,
+      };
+    }),
+  );
+
+  members.sort((a, b) => {
+    if (a.isOrganizer !== b.isOrganizer) return a.isOrganizer ? -1 : 1;
+    return a.joinedAt - b.joinedAt;
+  });
+
+  return { members };
+});
+
+export const removeRoomMember = onCall(async (request) => {
+  const { uid, email } = requireAuth(request);
+  const roomId = String(request.data?.roomId ?? "").trim();
+  const memberUid = String(request.data?.memberUid ?? "").trim();
+  if (!roomId || !memberUid) {
+    throw new HttpsError("invalid-argument", "roomId and memberUid required");
+  }
+  await rateLimit(uid, "removeRoomMember");
+
+  const ctx = await loadAccessContext(roomId, uid, email);
+  if (!ctx.isOrganizer) {
+    throw new HttpsError("permission-denied", "Only the organizer can remove members");
+  }
+
+  const organizerId = String(ctx.room.organizerId ?? "");
+  if (memberUid === organizerId) {
+    throw new HttpsError("failed-precondition", "Cannot remove the room organizer");
+  }
+
+  const memberRef = db.doc(`roomMembers/${roomId}/members/${memberUid}`);
+  const memberSnap = await memberRef.get();
+  if (!memberSnap.exists) {
+    throw new HttpsError("not-found", "Member not found");
+  }
+
+  await revokeMembership(roomId, memberUid);
+  return { ok: true as const };
+});
+
 export const rotateJoinCode = onCall(async (request) => {
   const { uid } = requireAuth(request);
   const roomId = String(request.data?.roomId ?? "");
@@ -1378,6 +1466,475 @@ async function deleteQueryInBatches(
   return deleted;
 }
 
+function engagementMirrorPayload(
+  data: FirebaseFirestore.DocumentData,
+): Record<string, unknown> {
+  const type = data.type as EngagementType;
+  const payload: Record<string, unknown> = {
+    type,
+    prompt: data.prompt,
+    status: data.status as EngagementStatus,
+    resultsVisibility: (data.resultsVisibility as EngagementResultsVisibility) || "live",
+    responseCount: Number(data.responseCount ?? 0),
+    createdAt: Number(data.createdAt ?? 0),
+    closedAt: data.closedAt ?? null,
+    createdBy: data.createdBy,
+  };
+  if (type === "mcq") {
+    payload.options = data.options ?? [];
+    payload.optionCounts = data.optionCounts ?? {};
+  } else {
+    payload.phrases = data.phrases ?? [];
+  }
+  return payload;
+}
+
+function serializeEngagementDoc(
+  id: string,
+  data: FirebaseFirestore.DocumentData,
+) {
+  return {
+    id,
+    type: data.type as EngagementType,
+    prompt: String(data.prompt ?? ""),
+    status: data.status as EngagementStatus,
+    resultsVisibility:
+      (data.resultsVisibility as EngagementResultsVisibility) || "live",
+    options: (data.options as { id: string; label: string }[]) ?? [],
+    optionCounts: (data.optionCounts as Record<string, number>) ?? {},
+    phrases: (data.phrases as { text: string; count: number }[]) ?? [],
+    responseCount: Number(data.responseCount ?? 0),
+    createdAt: Number(data.createdAt ?? 0),
+    closedAt: (data.closedAt as number | null) ?? null,
+    createdBy: String(data.createdBy ?? ""),
+  };
+}
+
+async function closeLiveEngagements(roomId: string): Promise<void> {
+  const live = await db
+    .collection(`engagements/${roomId}/items`)
+    .where("status", "==", "live")
+    .get();
+  const closedAt = Date.now();
+  await Promise.all(
+    live.docs.map(async (docSnap) => {
+      await docSnap.ref.update({ status: "closed", closedAt });
+      const next = { ...docSnap.data(), status: "closed", closedAt };
+      await mirrorEngagement(roomId, docSnap.id, engagementMirrorPayload(next));
+    }),
+  );
+}
+
+/** Organizer creates a draft (or goes live immediately with startLive). */
+export const createEngagement = onCall(async (request) => {
+  const { uid, email } = requireAuth(request);
+  const roomId = String(request.data?.roomId ?? "").trim();
+  if (!roomId) throw new HttpsError("invalid-argument", "roomId required");
+  await rateLimit(uid, "createEngagement");
+
+  const ctx = await loadAccessContext(roomId, uid, email);
+  if (!ctx.isOrganizer) {
+    throw new HttpsError("permission-denied", "Only the organizer can create engagements");
+  }
+
+  let type: EngagementType;
+  let prompt: string;
+  let options: { id: string; label: string }[] = [];
+  let resultsVisibility: EngagementResultsVisibility;
+  try {
+    type = assertEngagementType(request.data?.type);
+    prompt = assertEngagementPrompt(request.data?.prompt);
+    resultsVisibility = assertResultsVisibility(request.data?.resultsVisibility);
+    if (type === "mcq") {
+      options = assertMcqOptions(request.data?.options);
+    }
+  } catch (err) {
+    throw new HttpsError(
+      "invalid-argument",
+      err instanceof Error ? err.message : "Invalid engagement",
+    );
+  }
+
+  const startLive = Boolean(request.data?.startLive);
+  if (startLive) {
+    await closeLiveEngagements(roomId);
+  }
+
+  const ref = db.collection(`engagements/${roomId}/items`).doc();
+  const createdAt = Date.now();
+  const optionCounts: Record<string, number> = {};
+  for (const opt of options) optionCounts[opt.id] = 0;
+
+  const status: EngagementStatus = startLive ? "live" : "draft";
+  const doc = {
+    type,
+    prompt,
+    options: type === "mcq" ? options : [],
+    optionCounts: type === "mcq" ? optionCounts : {},
+    phraseCounts: {} as Record<string, number>,
+    phraseDisplay: {} as Record<string, string>,
+    phrases: [] as { text: string; count: number }[],
+    responseCount: 0,
+    status,
+    resultsVisibility,
+    createdBy: uid,
+    createdAt,
+    closedAt: null as number | null,
+  };
+  await ref.set(doc);
+  if (status === "live") {
+    await mirrorEngagement(roomId, ref.id, engagementMirrorPayload(doc));
+  }
+  return { engagementId: ref.id, status };
+});
+
+export const updateEngagement = onCall(async (request) => {
+  const { uid, email } = requireAuth(request);
+  const roomId = String(request.data?.roomId ?? "").trim();
+  const engagementId = String(request.data?.engagementId ?? "").trim();
+  if (!roomId || !engagementId) {
+    throw new HttpsError("invalid-argument", "roomId and engagementId required");
+  }
+  await rateLimit(uid, "updateEngagement");
+
+  const ctx = await loadAccessContext(roomId, uid, email);
+  if (!ctx.isOrganizer) {
+    throw new HttpsError("permission-denied", "Only the organizer can update engagements");
+  }
+
+  const ref = db.doc(`engagements/${roomId}/items/${engagementId}`);
+  const snap = await ref.get();
+  if (!snap.exists) throw new HttpsError("not-found", "Engagement not found");
+  const data = snap.data()!;
+  if (data.status !== "draft") {
+    throw new HttpsError("failed-precondition", "Only drafts can be edited");
+  }
+
+  const patch: Record<string, unknown> = {};
+  try {
+    if (request.data?.prompt != null) {
+      patch.prompt = assertEngagementPrompt(request.data.prompt);
+    }
+    if (request.data?.resultsVisibility != null) {
+      patch.resultsVisibility = assertResultsVisibility(
+        request.data.resultsVisibility,
+      );
+    }
+    if (data.type === "mcq" && request.data?.options != null) {
+      const options = assertMcqOptions(request.data.options);
+      const optionCounts: Record<string, number> = {};
+      for (const opt of options) optionCounts[opt.id] = 0;
+      patch.options = options;
+      patch.optionCounts = optionCounts;
+    }
+  } catch (err) {
+    throw new HttpsError(
+      "invalid-argument",
+      err instanceof Error ? err.message : "Invalid engagement",
+    );
+  }
+
+  if (Object.keys(patch).length === 0) {
+    return { ok: true as const };
+  }
+  await ref.update(patch);
+  return { ok: true as const };
+});
+
+export const goLiveEngagement = onCall(async (request) => {
+  const { uid, email } = requireAuth(request);
+  const roomId = String(request.data?.roomId ?? "").trim();
+  const engagementId = String(request.data?.engagementId ?? "").trim();
+  if (!roomId || !engagementId) {
+    throw new HttpsError("invalid-argument", "roomId and engagementId required");
+  }
+  await rateLimit(uid, "goLiveEngagement");
+
+  const ctx = await loadAccessContext(roomId, uid, email);
+  if (!ctx.isOrganizer) {
+    throw new HttpsError("permission-denied", "Only the organizer can go live");
+  }
+
+  const ref = db.doc(`engagements/${roomId}/items/${engagementId}`);
+  const snap = await ref.get();
+  if (!snap.exists) throw new HttpsError("not-found", "Engagement not found");
+  const data = snap.data()!;
+  if (data.status === "live") {
+    return { ok: true as const, alreadyLive: true };
+  }
+  if (data.status === "closed") {
+    throw new HttpsError("failed-precondition", "Closed engagements cannot go live");
+  }
+
+  await closeLiveEngagements(roomId);
+  await ref.update({ status: "live", closedAt: null });
+  const next = { ...data, status: "live", closedAt: null };
+  await mirrorEngagement(roomId, engagementId, engagementMirrorPayload(next));
+  return { ok: true as const };
+});
+
+export const closeEngagement = onCall(async (request) => {
+  const { uid, email } = requireAuth(request);
+  const roomId = String(request.data?.roomId ?? "").trim();
+  const engagementId = String(request.data?.engagementId ?? "").trim();
+  if (!roomId || !engagementId) {
+    throw new HttpsError("invalid-argument", "roomId and engagementId required");
+  }
+  await rateLimit(uid, "closeEngagement");
+
+  const ctx = await loadAccessContext(roomId, uid, email);
+  if (!ctx.isOrganizer) {
+    throw new HttpsError("permission-denied", "Only the organizer can close engagements");
+  }
+
+  const ref = db.doc(`engagements/${roomId}/items/${engagementId}`);
+  const snap = await ref.get();
+  if (!snap.exists) throw new HttpsError("not-found", "Engagement not found");
+  const data = snap.data()!;
+  if (data.status === "closed") {
+    return { ok: true as const, alreadyClosed: true };
+  }
+  if (data.status === "draft") {
+    throw new HttpsError("failed-precondition", "Drafts cannot be closed; delete instead");
+  }
+  const closedAt = Date.now();
+  await ref.update({ status: "closed", closedAt });
+  await mirrorEngagement(
+    roomId,
+    engagementId,
+    engagementMirrorPayload({ ...data, status: "closed", closedAt }),
+  );
+  return { ok: true as const };
+});
+
+export const deleteEngagement = onCall(async (request) => {
+  const { uid, email } = requireAuth(request);
+  const roomId = String(request.data?.roomId ?? "").trim();
+  const engagementId = String(request.data?.engagementId ?? "").trim();
+  if (!roomId || !engagementId) {
+    throw new HttpsError("invalid-argument", "roomId and engagementId required");
+  }
+  await rateLimit(uid, "deleteEngagement");
+
+  const ctx = await loadAccessContext(roomId, uid, email);
+  if (!ctx.isOrganizer) {
+    throw new HttpsError("permission-denied", "Only the organizer can delete engagements");
+  }
+
+  const ref = db.doc(`engagements/${roomId}/items/${engagementId}`);
+  const snap = await ref.get();
+  if (!snap.exists) throw new HttpsError("not-found", "Engagement not found");
+
+  const responders = await db
+    .collection(`engagementResponses/${roomId}/items/${engagementId}/users`)
+    .get();
+  await deleteQueryInBatches(
+    db.collection(`engagementResponses/${roomId}/items/${engagementId}/users`),
+  );
+  await ref.delete();
+  await removeMirroredEngagement(roomId, engagementId);
+  await Promise.all(
+    responders.docs.map((d) =>
+      clearUserEngagementResponse(d.id, roomId, engagementId),
+    ),
+  );
+  return { ok: true as const };
+});
+
+export const listEngagements = onCall(async (request) => {
+  const { uid, email } = requireAuth(request);
+  const roomId = String(request.data?.roomId ?? "").trim();
+  if (!roomId) throw new HttpsError("invalid-argument", "roomId required");
+  await rateLimit(uid, "listEngagements");
+
+  const ctx = await loadAccessContext(roomId, uid, email);
+  if (!ctx.isOrganizer) {
+    throw new HttpsError("permission-denied", "Only the organizer can list all engagements");
+  }
+
+  const snap = await db.collection(`engagements/${roomId}/items`).get();
+  const engagements = snap.docs
+    .map((d) => serializeEngagementDoc(d.id, d.data()))
+    .sort((a, b) => {
+      const rank = (s: EngagementStatus) =>
+        s === "live" ? 0 : s === "draft" ? 1 : 2;
+      const r = rank(a.status) - rank(b.status);
+      if (r !== 0) return r;
+      return b.createdAt - a.createdAt;
+    });
+  return { engagements };
+});
+
+export const exportEngagements = onCall(async (request) => {
+  const { uid, email } = requireAuth(request);
+  const roomId = String(request.data?.roomId ?? "").trim();
+  if (!roomId) throw new HttpsError("invalid-argument", "roomId required");
+  await rateLimit(uid, "exportEngagements");
+
+  const ctx = await loadAccessContext(roomId, uid, email);
+  if (!ctx.isOrganizer) {
+    throw new HttpsError("permission-denied", "Only the organizer can export engagements");
+  }
+
+  const engagementIdFilter = String(request.data?.engagementId ?? "").trim();
+  let engDocs: FirebaseFirestore.QueryDocumentSnapshot[];
+  if (engagementIdFilter) {
+    const one = await db.doc(`engagements/${roomId}/items/${engagementIdFilter}`).get();
+    if (!one.exists) throw new HttpsError("not-found", "Engagement not found");
+    engDocs = [one as FirebaseFirestore.QueryDocumentSnapshot];
+  } else {
+    const snap = await db.collection(`engagements/${roomId}/items`).get();
+    engDocs = snap.docs;
+  }
+
+  const anonymous = Boolean(ctx.room.anonymous);
+  const engagements = [];
+
+  for (const engDoc of engDocs) {
+    const data = engDoc.data();
+    const responsesSnap = await db
+      .collection(`engagementResponses/${roomId}/items/${engDoc.id}/users`)
+      .get();
+    const responses = responsesSnap.docs.map((r) => {
+      const rd = r.data();
+      return {
+        respondentLabel: anonymous ? "Anonymous" : r.id,
+        optionId: (rd.optionId as string | undefined) ?? null,
+        text: (rd.text as string | undefined) ?? null,
+        createdAt: Number(rd.createdAt ?? 0),
+        updatedAt: Number(rd.updatedAt ?? rd.createdAt ?? 0),
+      };
+    });
+    engagements.push({
+      ...serializeEngagementDoc(engDoc.id, data),
+      responses,
+    });
+  }
+
+  engagements.sort((a, b) => b.createdAt - a.createdAt);
+  return { engagements };
+});
+
+export const respondToEngagement = onCall(async (request) => {
+  const { uid, email } = requireAuth(request);
+  const roomId = String(request.data?.roomId ?? "").trim();
+  const engagementId = String(request.data?.engagementId ?? "").trim();
+  if (!roomId || !engagementId) {
+    throw new HttpsError("invalid-argument", "roomId and engagementId required");
+  }
+  await rateLimit(uid, "respondEngagement");
+
+  const ctx = await loadAccessContext(roomId, uid, email);
+  const decision = canAccessRoom({
+    accessMode: ctx.accessMode,
+    isOrganizer: ctx.isOrganizer,
+    onAllowlist: ctx.onAllowlist,
+    isMember: ctx.isMember,
+  });
+  if (!decision.allowed) {
+    throw new HttpsError("permission-denied", "No access to this room");
+  }
+  if (ctx.room.viewOnly && !ctx.isOrganizer) {
+    throw new HttpsError("failed-precondition", "Room is view-only");
+  }
+
+  const engRef = db.doc(`engagements/${roomId}/items/${engagementId}`);
+  const responseRef = db.doc(
+    `engagementResponses/${roomId}/items/${engagementId}/users/${uid}`,
+  );
+
+  let mirrorResponse: { optionId?: string; text?: string } = {};
+
+  await db.runTransaction(async (tx) => {
+    const engSnap = await tx.get(engRef);
+    if (!engSnap.exists) {
+      throw new HttpsError("not-found", "Engagement not found");
+    }
+    const eng = engSnap.data()!;
+    if (eng.status !== "live") {
+      throw new HttpsError("failed-precondition", "This engagement is not live");
+    }
+
+    const type = eng.type as EngagementType;
+    const prevSnap = await tx.get(responseRef);
+    if (prevSnap.exists) {
+      throw new HttpsError("failed-precondition", "Already answered");
+    }
+
+    let optionCounts = {
+      ...((eng.optionCounts as Record<string, number>) ?? {}),
+    };
+    let phraseCounts = {
+      ...((eng.phraseCounts as Record<string, number>) ?? {}),
+    };
+    let phraseDisplay = {
+      ...((eng.phraseDisplay as Record<string, string>) ?? {}),
+    };
+    let responseCount = Number(eng.responseCount ?? 0);
+
+    if (type === "mcq") {
+      const optionId = String(request.data?.optionId ?? "").trim();
+      const options = (eng.options as { id: string; label: string }[]) ?? [];
+      if (!options.some((o) => o.id === optionId)) {
+        throw new HttpsError("invalid-argument", "Invalid option");
+      }
+      responseCount += 1;
+      optionCounts[optionId] = Number(optionCounts[optionId] ?? 0) + 1;
+      const now = Date.now();
+      tx.set(responseRef, {
+        uid,
+        optionId,
+        createdAt: now,
+        updatedAt: now,
+      });
+      mirrorResponse = { optionId };
+      tx.update(engRef, { optionCounts, responseCount });
+    } else {
+      let parsed: { text: string; phrase: string };
+      try {
+        parsed = assertOpenResponse(request.data?.text);
+      } catch (err) {
+        throw new HttpsError(
+          "invalid-argument",
+          err instanceof Error ? err.message : "Invalid response",
+        );
+      }
+      responseCount += 1;
+      phraseCounts[parsed.phrase] = Number(phraseCounts[parsed.phrase] ?? 0) + 1;
+      if (!phraseDisplay[parsed.phrase]) {
+        phraseDisplay[parsed.phrase] = parsed.text;
+      }
+      const now = Date.now();
+      tx.set(responseRef, {
+        uid,
+        text: parsed.text,
+        phrase: parsed.phrase,
+        createdAt: now,
+        updatedAt: now,
+      });
+      mirrorResponse = { text: parsed.text };
+      const phrases = topPhrasesFromMap(phraseCounts, phraseDisplay);
+      tx.update(engRef, {
+        phraseCounts,
+        phraseDisplay,
+        phrases,
+        responseCount,
+      });
+    }
+  });
+
+  const fresh = await engRef.get();
+  if (fresh.exists) {
+    await mirrorEngagement(
+      roomId,
+      engagementId,
+      engagementMirrorPayload(fresh.data()!),
+    );
+  }
+  await mirrorUserEngagementResponse(uid, roomId, engagementId, mirrorResponse);
+  return { ok: true as const };
+});
+
 /** Organizer permanently deletes a room and related Firestore/RTDB data. */
 export const deleteRoom = onCall(async (request) => {
   const { uid } = requireAuth(request);
@@ -1418,6 +1975,18 @@ export const deleteRoom = onCall(async (request) => {
     db.collection(`roomAllowlists/${roomId}/emails`),
   );
   await deleteQueryInBatches(db.collection(`roomMembers/${roomId}/members`));
+
+  const engagementSnaps = await db
+    .collection(`engagements/${roomId}/items`)
+    .get();
+  for (const engDoc of engagementSnaps.docs) {
+    await deleteQueryInBatches(
+      db.collection(
+        `engagementResponses/${roomId}/items/${engDoc.id}/users`,
+      ),
+    );
+  }
+  await deleteQueryInBatches(db.collection(`engagements/${roomId}/items`));
 
   await releaseJoinCode(room.joinCode as string | null | undefined);
   await roomRef.delete();

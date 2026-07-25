@@ -55,6 +55,15 @@ service cloud.firestore {
       allow write: if false;
     }
 
+    match /engagements/{roomId}/items/{engagementId} {
+      allow read, write: if false;
+    }
+
+    match /engagementResponses/{roomId}/items/{engagementId}/users/{uid} {
+      allow read: if isSelf(uid);
+      allow write: if false;
+    }
+
     match /joinCodes/{code} {
       allow read, write: if false;
     }

@@ -4,12 +4,12 @@ import { pageTitle } from "@/lib/branding";
 export const metadata: Metadata = {
   title: "Join with a code",
   description:
-    "Enter a 6-digit code to join a Pulse live Q&A room. By Rotaract South Asia MDIO.",
+    "Enter a 6-digit code to join a Pulse live room. By Rotaract South Asia MDIO.",
   alternates: { canonical: "/join" },
   openGraph: {
     title: pageTitle("Join with a code"),
     description:
-      "Enter a 6-digit code to join a Pulse live Q&A room. By Rotaract South Asia MDIO.",
+      "Enter a 6-digit code to join a Pulse live room. By Rotaract South Asia MDIO.",
     url: "/join",
   },
 };

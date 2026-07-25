@@ -1,12 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
+  membersToCsv,
   normalizeEmail,
   normalizeSlugInput,
   questionHeadline,
   questionsToCsv,
   sortQuestions,
 } from "./utils";
-import type { QuestionView } from "./types";
+import type { QuestionView, RoomMemberRow } from "./types";
 
 describe("normalizeEmail", () => {
   it("normalizes", () => {
@@ -51,5 +52,33 @@ describe("questionsToCsv", () => {
     expect(csv).toContain("outline");
     expect(csv).toContain("yes");
     expect(questionHeadline({ question: "", text: "legacy" })).toBe("legacy");
+  });
+});
+
+describe("membersToCsv", () => {
+  it("exports name email and join path", () => {
+    const members: RoomMemberRow[] = [
+      {
+        uid: "1",
+        displayName: 'Ada "Lovelace"',
+        email: "ada@example.com",
+        via: "code",
+        joinedAt: 0,
+        isOrganizer: false,
+      },
+      {
+        uid: "2",
+        displayName: "Host",
+        email: "host@example.com",
+        via: "organizer",
+        joinedAt: 0,
+        isOrganizer: true,
+      },
+    ];
+    const csv = membersToCsv(members);
+    expect(csv.split("\n")[0]).toBe("name,email,joinedVia,isHost,joinedAt");
+    expect(csv).toContain('"Ada ""Lovelace"""');
+    expect(csv).toContain("entry_code");
+    expect(csv).toContain("host");
   });
 });

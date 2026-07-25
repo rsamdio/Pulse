@@ -69,7 +69,28 @@ export const RATE_LIMIT_MS = {
   ensureUser: 0,
   promoteUser: 1500,
   demoteUser: 1500,
+  createEngagement: 2000,
+  updateEngagement: 1000,
+  goLiveEngagement: 1000,
+  closeEngagement: 500,
+  deleteEngagement: 800,
+  respondEngagement: 400,
+  listEngagements: 0,
+  exportEngagements: 2000,
+  listRoomMembers: 0,
+  removeRoomMember: 800,
 };
+
+export type EngagementType = "mcq" | "open";
+export type EngagementStatus = "draft" | "live" | "closed";
+export type EngagementResultsVisibility = "live" | "after_close";
+
+export const MAX_ENGAGEMENT_PROMPT = 200;
+export const MAX_ENGAGEMENT_OPTIONS = 6;
+export const MIN_ENGAGEMENT_OPTIONS = 2;
+export const MAX_OPTION_LABEL = 80;
+export const MAX_OPEN_RESPONSE = 60;
+export const MAX_PHRASE_MIRROR = 40;
 
 /** Digits only — attendees type what they see on screen. */
 export function normalizeJoinCode(raw: string): string {
@@ -171,4 +192,99 @@ export function sanitizeCsvCell(value: string): string {
     return `'${value}`;
   }
   return value;
+}
+
+/** Normalize open-text answers for aggregation (case/spacing). */
+export function normalizeOpenPhrase(raw: string): string {
+  return raw.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+export function assertEngagementPrompt(raw: unknown): string {
+  if (typeof raw !== "string") throw new Error("Prompt is required");
+  const prompt = raw.trim();
+  if (!prompt) throw new Error("Prompt is required");
+  if (prompt.length > MAX_ENGAGEMENT_PROMPT) {
+    throw new Error(
+      `Prompt must be at most ${MAX_ENGAGEMENT_PROMPT} characters`,
+    );
+  }
+  return prompt;
+}
+
+export function assertEngagementType(raw: unknown): EngagementType {
+  if (raw === "mcq" || raw === "open") return raw;
+  throw new Error("Type must be mcq or open");
+}
+
+export function assertResultsVisibility(
+  raw: unknown,
+): EngagementResultsVisibility {
+  if (raw == null || raw === "") return "live";
+  if (raw === "live" || raw === "after_close") return raw;
+  throw new Error("Results visibility must be live or after_close");
+}
+
+export function assertMcqOptions(raw: unknown): { id: string; label: string }[] {
+  if (!Array.isArray(raw)) throw new Error("Options are required");
+  if (
+    raw.length < MIN_ENGAGEMENT_OPTIONS ||
+    raw.length > MAX_ENGAGEMENT_OPTIONS
+  ) {
+    throw new Error(
+      `Provide ${MIN_ENGAGEMENT_OPTIONS}–${MAX_ENGAGEMENT_OPTIONS} options`,
+    );
+  }
+  const options: { id: string; label: string }[] = [];
+  const seen = new Set<string>();
+  for (let i = 0; i < raw.length; i++) {
+    const item = raw[i];
+    const label =
+      typeof item === "string"
+        ? item.trim()
+        : typeof item === "object" &&
+            item &&
+            typeof (item as { label?: unknown }).label === "string"
+          ? String((item as { label: string }).label).trim()
+          : "";
+    if (!label) throw new Error(`Option ${i + 1} is empty`);
+    if (label.length > MAX_OPTION_LABEL) {
+      throw new Error(
+        `Option ${i + 1} must be at most ${MAX_OPTION_LABEL} characters`,
+      );
+    }
+    const key = label.toLowerCase();
+    if (seen.has(key)) throw new Error("Duplicate options are not allowed");
+    seen.add(key);
+    options.push({ id: `opt${i + 1}`, label });
+  }
+  return options;
+}
+
+export function assertOpenResponse(raw: unknown): {
+  text: string;
+  phrase: string;
+} {
+  if (typeof raw !== "string") throw new Error("Response is required");
+  const text = raw.trim();
+  if (!text) throw new Error("Response is required");
+  if (text.length > MAX_OPEN_RESPONSE) {
+    throw new Error(
+      `Response must be at most ${MAX_OPEN_RESPONSE} characters`,
+    );
+  }
+  return { text, phrase: normalizeOpenPhrase(text) };
+}
+
+export function topPhrasesFromMap(
+  counts: Record<string, number>,
+  display: Record<string, string>,
+  limit = MAX_PHRASE_MIRROR,
+): { text: string; count: number }[] {
+  return Object.entries(counts)
+    .map(([phrase, count]) => ({
+      text: display[phrase] || phrase,
+      count,
+    }))
+    .sort((a, b) => b.count - a.count || a.text.localeCompare(b.text))
+    .slice(0, limit);
 }
