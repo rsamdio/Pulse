@@ -146,42 +146,11 @@ function QuestionCardInner({
           </div>
 
           <div className="question-body">
-            <div className="question-top">
-              <div className="min-w-0 flex-1">
-                {answered ? (
-                  <span className="answered-badge">Answered</span>
-                ) : null}
-                <h3 className="question-title">{headline}</h3>
-              </div>
-              {canModerate ? (
-                <div className="moderate-actions">
-                  {onToggleAnswered ? (
-                    <button
-                      type="button"
-                      className="moderate-answer"
-                      disabled={answering}
-                      onClick={() => void handleToggleAnswered()}
-                    >
-                      {answering
-                        ? "…"
-                        : answered
-                          ? "Unmark"
-                          : "Answered"}
-                    </button>
-                  ) : null}
-                  {onDelete ? (
-                    <button
-                      type="button"
-                      className="moderate-delete"
-                      disabled={deleting}
-                      onClick={() => setConfirmOpen(true)}
-                      aria-label="Delete question"
-                    >
-                      Remove
-                    </button>
-                  ) : null}
-                </div>
+            <div className="question-heading">
+              {answered ? (
+                <span className="answered-badge">Answered</span>
               ) : null}
+              <h3 className="question-title">{headline}</h3>
             </div>
 
             {description ? (
@@ -222,11 +191,50 @@ function QuestionCardInner({
               ) : null}
             </div>
 
+            {canModerate ? (
+              <div
+                className="moderate-actions"
+                role="group"
+                aria-label="Moderate question"
+                aria-busy={answering || deleting || undefined}
+              >
+                {onToggleAnswered ? (
+                  <button
+                    type="button"
+                    className={`moderate-answer${answered ? " is-answered" : ""}`}
+                    disabled={answering || deleting}
+                    onClick={() => void handleToggleAnswered()}
+                  >
+                    {answering
+                      ? "Saving…"
+                      : answered
+                        ? "Mark unanswered"
+                        : "Mark answered"}
+                  </button>
+                ) : null}
+                {onDelete ? (
+                  <button
+                    type="button"
+                    className="moderate-delete"
+                    disabled={deleting || answering}
+                    onClick={() => setConfirmOpen(true)}
+                    aria-label="Remove question"
+                  >
+                    {deleting ? "Removing…" : "Remove"}
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
+
             {voteError ? (
-              <p className="question-error">{voteError}</p>
+              <p className="question-error" role="alert">
+                {voteError}
+              </p>
             ) : null}
             {modError ? (
-              <p className="question-error">{modError}</p>
+              <p className="question-error" role="alert">
+                {modError}
+              </p>
             ) : null}
           </div>
         </div>
