@@ -46,9 +46,10 @@ Production URL: `https://pulse.rsamdio.org`
 
 - Product name in UI: **Pulse** (logo: `/rsamdio.webp`)
 - Copyright: **© YEAR RSAMDIO**
-- Meta/OG titles include Rotaract South Asia MDIO; do **not** put MDIO text in header/footer UI
-- `metadataBase`: `https://pulse.rsamdio.org` · assets `/og.png`, favicons in `src/app/` + `public/`
-- Sitemap/robots: public pages only; `/rooms` is `noindex`
+- Meta/OG titles include Rotaract South Asia MDIO; do **not** put MDIO text in **header** UI
+- Landing page (`/`) may show RSAMDIO / Rotaract South Asia MDIO in **body** copy; server-rendered for crawlers with Organization / WebSite / WebApplication (+ FAQ) JSON-LD and `areaServed: South Asia`
+- `metadataBase`: `https://pulse.rsamdio.org` · OG asset `/og.png` (1200×630) · favicons in `public/`
+- Sitemap/robots: public pages only (`/`, `/join`, `/terms`, `/privacy`); `/rooms` and `/admin` are `noindex`
 
 ## Conventions
 
